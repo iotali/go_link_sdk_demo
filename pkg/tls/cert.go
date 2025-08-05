@@ -1,0 +1,46 @@
+package tls
+
+import (
+	"crypto/x509"
+	"fmt"
+)
+
+const CustomCACert = `-----BEGIN CERTIFICATE-----
+MIIDjTCCAnWgAwIBAgIUCAs96kTOrkFlgY2NFaF4g7NocPYwDQYJKoZIhvcNAQEL
+BQAwVTELMAkGA1UEBhMCQ04xCzAJBgNVBAgMAkpTMQswCQYDVQQHDAJOSjEQMA4G
+A1UECgwHY29tcGFueTEMMAoGA1UECwwDSW9UMQwwCgYDVQQDDANJb1QwIBcNMjUw
+NDI4MDQwMTI3WhgPMjA1MjA5MTMwNDAxMjdaMFUxCzAJBgNVBAYTAkNOMQswCQYD
+VQQIDAJKUzELMAkGA1UEBwwCTkoxEDAOBgNVBAoMB2NvbXBhbnkxDDAKBgNVBAsM
+A0lvVDEMMAoGA1UEAwwDSW9UMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
+AQEA4BsfxKUz3/Sk2LXNT7fXbdH054EpjLC1ngtsQHsxTdDzs1oDUOvNxC7JUXVu
+LJswpie/gSkqV/syXGf5RG/2aaEnCK6KoeBGwk9QELTTPmBmPmuyOBCA1eVgLGbB
+vIv33Z7UwF0gb16RENughqHaqhvnqpIxfnyCfq7g5cd0f+8Nj4MyKKH94ryQwplw
+iCuFo/58wfS/zLUfds+xH/1dyOeV2XRp+nFpGHL9U0C3wBP9xS1V71SJOPXTeibE
+0/neN/zP/usHJMhu6zg7o4ZUUfWzt6cxsy+ivsmZQgDX2AZNKsCCEJg/rGwF6u95
+6rd3/mShmikIaogsaxQHXQYp1wIDAQABo1MwUTAdBgNVHQ4EFgQUVPRn6Pbs38LJ
+q6w4Z8qBG+DhxTMwHwYDVR0jBBgwFoAUVPRn6Pbs38LJq6w4Z8qBG+DhxTMwDwYD
+VR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEA3y+bO2dy79oHpMlvJY/j
+HgrXTHJQaB/7POdP+KRAOqYrqowM3R9V+mF/mb86EthL5baFqBdfb1Tx0jCUG+hp
+MzEK3msPtWA3n7p6IcHMVSgLGYIKsb2V3JYanJr9926+5sZCbTL8v3bGikQ/mfBr
+olU941hrGfg4t5nvzhNaNehkwjXX7j7SZcWO0J2uMN0L3+cEje5Fk121b5xu7nsR
+42L0pl3/Fd4qqOQ1fVe/DdbpK3a5rNKChS7U3UChI5jz2EOgJKiJIoHrPnAq5NH3
+y2T2/7Opaxk1ELh6+vAeia8VU+Zo8roD5TpP6xJrXSXGGUKMAgVe3/0HzzMc+3+7
+nw==
+-----END CERTIFICATE-----`
+
+func LoadCACert(certPEM string) (*x509.CertPool, error) {
+	if certPEM == "" {
+		certPEM = CustomCACert
+	}
+	
+	certPool := x509.NewCertPool()
+	if !certPool.AppendCertsFromPEM([]byte(certPEM)) {
+		return nil, fmt.Errorf("failed to parse CA certificate")
+	}
+	
+	return certPool, nil
+}
+
+func GetCustomCACert() string {
+	return CustomCACert
+}
