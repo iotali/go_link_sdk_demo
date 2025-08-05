@@ -63,7 +63,16 @@ func (c *RRPCClient) Start() error {
 	}
 
 	requestTopic := fmt.Sprintf("/sys/%s/%s/rrpc/request/+", c.productKey, c.deviceName)
-	return c.mqttClient.Subscribe(requestTopic, 0, c.handleRRPCRequest)
+	c.logger.Printf("Starting RRPC client, subscribing to topic: %s", requestTopic)
+	
+	err := c.mqttClient.Subscribe(requestTopic, 0, c.handleRRPCRequest)
+	if err != nil {
+		c.logger.Printf("Failed to subscribe to RRPC topic: %v", err)
+		return err
+	}
+	
+	c.logger.Printf("Successfully subscribed to RRPC topic: %s", requestTopic)
+	return nil
 }
 
 func (c *RRPCClient) Stop() error {
@@ -128,14 +137,16 @@ func (c *RRPCClient) extractRequestId(topic string) string {
 }
 
 func (c *RRPCClient) sendSuccessResponse(requestId string, data []byte) {
+	// Create response exactly matching C SDK format
 	response := RRPCResponse{
-		ID:      "1",
+		ID:      "1", 
 		Version: "1.0",
 	}
 
 	if data != nil && len(data) > 0 {
 		var responseData map[string]interface{}
 		if err := json.Unmarshal(data, &responseData); err == nil {
+			// C SDK compatibility: add params field
 			response.Params = responseData
 		} else {
 			response.Params = map[string]interface{}{
@@ -143,7 +154,7 @@ func (c *RRPCClient) sendSuccessResponse(requestId string, data []byte) {
 			}
 		}
 	} else {
-		// Default response similar to C code
+		// Default response matching C SDK exactly
 		response.Params = map[string]interface{}{
 			"LightSwitch": 0,
 		}

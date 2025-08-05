@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,12 +151,25 @@ func (c *Client) Subscribe(topic string, qos byte, handler MessageHandler) error
 	
 	token := c.mqttClient.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
 		c.mutex.RLock()
+		// First try exact match
 		if h, exists := c.handlers[msg.Topic()]; exists {
 			c.mutex.RUnlock()
 			h(msg.Topic(), msg.Payload())
-		} else {
-			c.mutex.RUnlock()
+			return
 		}
+		
+		// Then try wildcard match for subscribed topics
+		for subscribedTopic, handler := range c.handlers {
+			if c.topicMatches(subscribedTopic, msg.Topic()) {
+				c.mutex.RUnlock()
+				handler(msg.Topic(), msg.Payload())
+				return
+			}
+		}
+		c.mutex.RUnlock()
+		
+		// Log unhandled message
+		c.logger.Printf("No handler found for topic: %s, message: %s", msg.Topic(), string(msg.Payload()))
 	})
 	
 	if token.Wait() && token.Error() != nil {
@@ -187,8 +201,31 @@ func (c *Client) Unsubscribe(topic string) error {
 	return nil
 }
 
+func (c *Client) topicMatches(pattern, topic string) bool {
+	// Simple MQTT topic matching for + wildcard
+	// Convert pattern with + to regex-like matching
+	if !strings.Contains(pattern, "+") {
+		return pattern == topic
+	}
+	
+	patternParts := strings.Split(pattern, "/")
+	topicParts := strings.Split(topic, "/")
+	
+	if len(patternParts) != len(topicParts) {
+		return false
+	}
+	
+	for i, part := range patternParts {
+		if part != "+" && part != topicParts[i] {
+			return false
+		}
+	}
+	
+	return true
+}
+
 func (c *Client) defaultMessageHandler(client mqtt.Client, msg mqtt.Message) {
-	c.logger.Printf("Received message on topic %s: %s", msg.Topic(), string(msg.Payload()))
+	c.logger.Printf("DEFAULT HANDLER - Received message on topic %s: %s", msg.Topic(), string(msg.Payload()))
 }
 
 func (c *Client) connectionLostHandler(client mqtt.Client, err error) {

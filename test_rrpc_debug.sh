@@ -8,7 +8,7 @@ echo ""
 
 # Prepare JSON payload
 JSON_PAYLOAD='{"id":"123","version":"1.0","method":"LightSwitch","params":{"switch":1}}'
-BASE64_PAYLOAD=$(echo "$JSON_PAYLOAD" | base64)
+BASE64_PAYLOAD=$(echo -n "$JSON_PAYLOAD" | base64 -w 0)
 
 echo "JSON Payload: $JSON_PAYLOAD"
 echo "Base64 Payload: $BASE64_PAYLOAD"
