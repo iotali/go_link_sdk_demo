@@ -72,9 +72,143 @@ IOT_MQTT_SECURE_MODE, IOT_TLS_SKIP_VERIFY
 - Go 1.21+
 - `github.com/eclipse/paho.mqtt.golang v1.4.3` (core MQTT functionality)
 
+## TLS Configuration
+
+The SDK supports TLS connections with special handling for production environments:
+
+**Important Network Configuration**:
+- Port 1883 (non-TLS): Use IP `121.40.253.224`
+- Port 8883 (TLS): Use IP `121.41.43.80` (SSL offload configuration)
+
+**TLS Certificate Issues**:
+1. The server uses a **self-signed certificate** issued for CN="IoT", not for IP addresses
+2. Go's TLS validation is stricter than C SDK
+3. When connecting via IP to a certificate issued for a domain name, certificate validation will fail
+
+**Recommended TLS Configurations**:
+
+1. **For Testing/Development** (with self-signed certificates):
+```go
+cfg.TLS.SkipVerify = true  // Skip certificate verification
+```
+
+2. **For Production** (with proper certificates):
+```go
+cfg.TLS.SkipVerify = false
+cfg.TLS.ServerName = "IoT"  // Must match certificate CN
+```
+
+**Known Issues**:
+- The SDK's TLS logic in `pkg/mqtt/client.go` attempts to handle IP connections with domain certificates by setting `InsecureSkipVerify=true` when `ServerName` is set, but this may not work correctly with self-signed certificates
+- For self-signed certificates, always use `SkipVerify = true`
+
+## MQTT Topic Wildcard Support
+
+**Critical Issue Fixed**: The MQTT client now supports wildcard topic subscriptions (`+` and `#`). Without this, RRPC and other wildcard-based subscriptions will fail.
+
+**Implementation**: The client implements a `topicMatches` function that handles MQTT wildcard matching for message routing to the correct handlers.
+
+## Debugging and Process Management
+
+### Finding Background IoT Connections
+
+When IoT devices appear to stay online after closing programs, use these commands to find and terminate background processes:
+
+**1. Find processes by IoT platform ports:**
+```bash
+# Check active connections to IoT platform (most useful)
+lsof -i -P | grep -E "(8883|1883|121\.41\.43\.80|121\.40\.253\.224)" | grep -v LISTEN
+
+# Check network connections by port
+netstat -tulpn | grep -E "(:8883|:1883)"
+
+# Alternative using ss command
+ss -tulpn | grep -E "(:8883|:1883)"
+```
+
+**2. Find Go processes by device identifiers:**
+```bash
+# Search for processes containing device credentials
+ps aux | grep -E "(QLTMkOfW|WjJjXbP0X1|THYYENG5wd)" | grep -v grep
+
+# Find all Go-related processes
+ps aux | grep "go" | grep -v grep | grep -v gopls
+```
+
+**3. Find all running Go programs:**
+```bash
+# Find go run processes
+ps aux | grep -E "(go run|main\.go)" | grep -v grep
+
+# Find compiled Go binaries in cache
+ps aux | grep "/go-build/" | grep -v grep
+```
+
+**4. Kill processes safely:**
+```bash
+# Kill specific process by PID
+kill -15 <PID>  # Try graceful termination first
+kill -9 <PID>   # Force kill if needed
+
+# Kill all Go processes (use with caution)
+pkill -f "go run"
+```
+
+**5. Comprehensive IoT connection check:**
+```bash
+# One-liner to find all IoT-related connections
+lsof -i -P | grep -E "(8883|1883)" | grep -v LISTEN && ps aux | grep -E "(go run|/go-build/)" | grep -v grep
+```
+
+### Common Issues
+
+- Programs started from editors (VSCode, Cursor) may continue running in background
+- Go programs compiled to `/home/pi/.cache/go-build/` may not be obvious from process names
+- Always use `Ctrl+C` to properly exit programs instead of closing terminal windows
+
+## Dynamic Registration (MQTT)
+
+**Important Implementation Details**:
+
+The MQTT dynamic registration process differs from regular MQTT connections and has specific requirements:
+
+### Authentication Format
+1. **ClientID**: `deviceName.productKey|random={random},authType={authType},securemode=2,signmethod=hmacsha256|`
+   - Note: deviceName comes FIRST, then productKey
+   - authType: "register" for whitelist mode, "regnwl" for non-whitelist mode
+   - random: Use random number, NOT timestamp
+
+2. **Username**: `deviceName&productKey`
+
+3. **Password**: HMAC-SHA256 signature with **UPPERCASE** hex encoding
+   - Sign content: `deviceName{deviceName}productKey{productKey}random{random}`
+   - Sign with ProductSecret (NOT DeviceSecret)
+
+### Message Flow
+**Critical**: Dynamic registration does NOT require manual topic subscription!
+
+1. Client connects to MQTT broker with special credentials
+2. Server automatically subscribes client to `/ext/register/{productKey}/{deviceName}`
+3. Server pushes registration result immediately after connection
+4. Response format: `{"deviceSecret":"xxx"}` (direct JSON, no wrapper)
+
+### Common Pitfalls
+- **Wrong auth type**: Make sure skipPreRegist flag matches your platform configuration
+- **Case sensitivity**: Password MUST be uppercase hex (C SDK compatibility)
+- **No manual subscription**: Server handles subscription automatically
+- **ProductSecret vs DeviceSecret**: Use ProductSecret for dynamic registration authentication
+
+### Example Success Log
+```
+Dynamic registration connecting with ClientID: deviceName.productKey|random=xxx,authType=register,securemode=2,signmethod=hmacsha256|
+Connected to MQTT broker for dynamic registration: ssl://121.41.43.80:8883
+Received message on topic /ext/register: {"deviceSecret":"xxx"}
+```
+
 ## Current Limitations
 
 - No automated test suite exists
 - No CI/CD pipeline configured
 - Documentation primarily in Chinese
 - No custom build scripts or Makefile
+- Background process management requires manual checking

@@ -22,7 +22,8 @@ func main() {
 	cfg.MQTT.Port = 8883
 	cfg.MQTT.UseTLS = true
 
-	cfg.TLS.SkipVerify = true  // 暂时跳过证书验证
+	cfg.TLS.SkipVerify = false  // 使用内置CA证书验证
+	cfg.TLS.ServerName = "IoT"   // 设置ServerName以匹配证书CN
 
 	client := mqtt.NewClient(cfg)
 

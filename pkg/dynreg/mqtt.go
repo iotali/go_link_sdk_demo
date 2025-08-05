@@ -1,10 +1,14 @@
 package dynreg
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,11 +19,12 @@ import (
 )
 
 type MQTTDynRegClient struct {
-	config     *config.Config
-	mqttClient mqtt.Client
-	logger     *log.Logger
-	response   chan *MQTTDynRegResponse
-	mutex      sync.Mutex
+	config        *config.Config
+	mqttClient    mqtt.Client
+	logger        *log.Logger
+	response      chan *MQTTDynRegResponse
+	mutex         sync.Mutex
+	skipPreRegist bool // Store skipPreRegist flag for auth type determination
 }
 
 type MQTTDynRegRequest struct {
@@ -62,23 +67,23 @@ func (c *MQTTDynRegClient) Register(skipPreRegist bool, timeout time.Duration) (
 		return nil, fmt.Errorf("product secret is required for MQTT dynamic registration")
 	}
 
+	// Store skipPreRegist flag for use in connect()
+	c.skipPreRegist = skipPreRegist
+
 	if err := c.connect(); err != nil {
 		return nil, fmt.Errorf("failed to connect to MQTT broker: %w", err)
 	}
 	defer c.disconnect()
 
-	responseTopic := fmt.Sprintf("/ext/register/%s/%s", c.config.Device.ProductKey, c.config.Device.DeviceName)
-	if err := c.subscribe(responseTopic); err != nil {
-		return nil, fmt.Errorf("failed to subscribe to response topic: %w", err)
-	}
-
-	if err := c.publishRequest(skipPreRegist); err != nil {
-		return nil, fmt.Errorf("failed to publish registration request: %w", err)
-	}
-
+	// In dynamic registration, server will automatically subscribe the client
+	// to /ext/register/{productKey}/{deviceName} and send response
+	// We just need to wait for the message to arrive
+	
+	// Wait for registration response
+	// The server will automatically push the result once connected
 	select {
 	case resp := <-c.response:
-		if resp.Code != 200 {
+		if resp.Code != 200 && resp.Code != 0 {  // Some servers may return 0 for success
 			return nil, fmt.Errorf("dynamic registration failed: code=%d, message=%s", resp.Code, resp.Message)
 		}
 		return &resp.Data, nil
@@ -88,7 +93,40 @@ func (c *MQTTDynRegClient) Register(skipPreRegist bool, timeout time.Duration) (
 }
 
 func (c *MQTTDynRegClient) connect() error {
-	clientID := fmt.Sprintf("%s.%s", c.config.Device.ProductKey, c.config.Device.DeviceName)
+	// Generate random number for dynamic registration (10 digits max)
+	random := fmt.Sprintf("%d", time.Now().UnixNano()%10000000000)
+	
+	// Determine auth type based on skipPreRegist flag
+	authType := "register"  // Whitelist mode (default)
+	if c.skipPreRegist {
+		authType = "regnwl"  // Non-whitelist mode
+	}
+	
+	// Generate authentication credentials for dynamic registration
+	// Format: deviceName.productKey|random={random},authType={authType},securemode=2,signmethod=hmacsha256|
+	// Note: C SDK source shows order is deviceName first, then productKey
+	clientID := fmt.Sprintf("%s.%s|random=%s,authType=%s,securemode=2,signmethod=hmacsha256|", 
+		c.config.Device.DeviceName,
+		c.config.Device.ProductKey,
+		random,
+		authType)
+	
+	// For dynamic registration, username is deviceName&productKey
+	username := fmt.Sprintf("%s&%s", c.config.Device.DeviceName, c.config.Device.ProductKey)
+	
+	// Generate password using HMAC-SHA256
+	// For dynamic registration: sign(content) where content = "deviceName{deviceName}productKey{productKey}random{random}"
+	content := fmt.Sprintf("deviceName%sproductKey%srandom%s", 
+		c.config.Device.DeviceName,
+		c.config.Device.ProductKey,
+		random)
+	password := calculateHMACSHA256(content, c.config.Device.ProductSecret)
+	
+	c.logger.Printf("Dynamic registration auth type: %s", authType)
+	c.logger.Printf("Dynamic registration random: %s", random)
+	c.logger.Printf("Dynamic registration sign content: %s", content)
+	c.logger.Printf("Dynamic registration product secret: %s", c.config.Device.ProductSecret)
+	c.logger.Printf("Dynamic registration password: %s", password)
 	
 	opts := mqtt.NewClientOptions()
 	
@@ -111,9 +149,25 @@ func (c *MQTTDynRegClient) connect() error {
 	
 	opts.AddBroker(broker)
 	opts.SetClientID(clientID)
+	opts.SetUsername(username)
+	opts.SetPassword(password)
 	opts.SetCleanSession(true)
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetAutoReconnect(false)
+	
+	// Set default message handler to receive registration response
+	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+		c.logger.Printf("Received message on topic %s: %s", msg.Topic(), string(msg.Payload()))
+		
+		// Check if this is a registration response
+		expectedTopic := fmt.Sprintf("/ext/register/%s/%s", c.config.Device.ProductKey, c.config.Device.DeviceName)
+		if msg.Topic() == expectedTopic {
+			c.messageHandler(client, msg)
+		}
+	})
+	
+	c.logger.Printf("Dynamic registration connecting with ClientID: %s", clientID)
+	c.logger.Printf("Dynamic registration Username: %s", username)
 
 	c.mqttClient = mqtt.NewClient(opts)
 	
@@ -183,8 +237,28 @@ func (c *MQTTDynRegClient) publishRequest(skipPreRegist bool) error {
 }
 
 func (c *MQTTDynRegClient) messageHandler(client mqtt.Client, msg mqtt.Message) {
-	c.logger.Printf("Received message on topic %s: %s", msg.Topic(), string(msg.Payload()))
+	c.logger.Printf("Processing registration response: %s", string(msg.Payload()))
 	
+	// First try to parse as direct response (like C SDK receives)
+	// Format: {"deviceSecret":"xxx"} or {"clientId":"xxx","username":"xxx","password":"xxx"}
+	var directResponse MQTTDynRegResponseData
+	if err := json.Unmarshal(msg.Payload(), &directResponse); err == nil {
+		// Direct response format
+		response := &MQTTDynRegResponse{
+			Code: 0,  // Success
+			Data: directResponse,
+		}
+		
+		select {
+		case c.response <- response:
+			c.logger.Printf("Registration successful, received deviceSecret: %s", directResponse.DeviceSecret)
+		default:
+			c.logger.Println("Response channel is full, dropping message")
+		}
+		return
+	}
+	
+	// Try to parse as wrapped response
 	var response MQTTDynRegResponse
 	if err := json.Unmarshal(msg.Payload(), &response); err != nil {
 		c.logger.Printf("Failed to unmarshal response: %v", err)
@@ -196,4 +270,11 @@ func (c *MQTTDynRegClient) messageHandler(client mqtt.Client, msg mqtt.Message) 
 	default:
 		c.logger.Println("Response channel is full, dropping message")
 	}
+}
+
+func calculateHMACSHA256(data, key string) string {
+	h := hmac.New(sha256.New, []byte(key))
+	h.Write([]byte(data))
+	// Use uppercase hex to match C SDK format
+	return strings.ToUpper(hex.EncodeToString(h.Sum(nil)))
 }
