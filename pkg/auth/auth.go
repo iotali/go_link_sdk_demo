@@ -15,9 +15,9 @@ type Credentials struct {
 
 func GenerateMQTTCredentials(productKey, deviceName, deviceSecret, secureMode string) *Credentials {
 	timestamp := "2524608000000" // 固定时间戳，与C SDK保持一致
-	sdkVersion := "go-sdk-1.0.0"
+	sdkVersion := "sdk-go-4.2.0"  // 使用与C SDK类似的版本格式
 	
-	clientID := fmt.Sprintf("%s.%s|timestamp=%s,_ss=1,_v=%s,securemode=%s,signmethod=hmacsha256,ext=3,|",
+	clientID := fmt.Sprintf("%s.%s|timestamp=%s,_ss=1,_v=%s,securemode=%s,signmethod=hmacsha256,ext=3,_conn=tl|",
 		productKey, deviceName, timestamp, sdkVersion, secureMode)
 	
 	username := fmt.Sprintf("%s&%s", deviceName, productKey)

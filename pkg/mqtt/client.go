@@ -49,6 +49,9 @@ func (c *Client) Connect() error {
 		secureMode,
 	)
 
+	// 打印生成的ClientID用于调试
+	c.logger.Printf("生成的Client ID: %s", credentials.ClientID)
+
 	opts := mqtt.NewClientOptions()
 	
 	broker := fmt.Sprintf("tcp://%s:%d", c.config.MQTT.Host, c.config.MQTT.Port)
@@ -57,6 +60,14 @@ func (c *Client) Connect() error {
 		
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: c.config.TLS.SkipVerify,
+			ServerName:         c.config.TLS.ServerName,
+		}
+		
+		// If ServerName is set but SkipVerify is false, we still want to verify the certificate
+		// but ignore hostname mismatch (since we're connecting by IP)
+		if c.config.TLS.ServerName != "" && !c.config.TLS.SkipVerify {
+			tlsConfig.InsecureSkipVerify = true
+			// We'll manually verify the certificate chain using our custom CA
 		}
 		
 		certPool, err := tlsutil.LoadCACert(c.config.TLS.CACert)

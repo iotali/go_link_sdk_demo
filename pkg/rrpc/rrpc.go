@@ -34,6 +34,7 @@ type RRPCRequest struct {
 type RRPCResponse struct {
 	ID      string                 `json:"id"`
 	Version string                 `json:"version"`
+	Params  map[string]interface{} `json:"params,omitempty"`
 	Code    int                    `json:"code,omitempty"`
 	Data    map[string]interface{} `json:"data,omitempty"`
 	Message string                 `json:"message,omitempty"`
@@ -130,17 +131,21 @@ func (c *RRPCClient) sendSuccessResponse(requestId string, data []byte) {
 	response := RRPCResponse{
 		ID:      "1",
 		Version: "1.0",
-		Code:    200,
 	}
 
 	if data != nil && len(data) > 0 {
 		var responseData map[string]interface{}
 		if err := json.Unmarshal(data, &responseData); err == nil {
-			response.Data = responseData
+			response.Params = responseData
 		} else {
-			response.Data = map[string]interface{}{
+			response.Params = map[string]interface{}{
 				"result": string(data),
 			}
+		}
+	} else {
+		// Default response similar to C code
+		response.Params = map[string]interface{}{
+			"LightSwitch": 0,
 		}
 	}
 
@@ -151,8 +156,12 @@ func (c *RRPCClient) sendErrorResponse(requestId string, code int, message strin
 	response := RRPCResponse{
 		ID:      "1",
 		Version: "1.0",
-		Code:    code,
-		Message: message,
+		Params: map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    code,
+				"message": message,
+			},
+		},
 	}
 
 	c.sendResponse(requestId, response)

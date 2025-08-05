@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/iot-go-sdk/pkg/config"
 	"github.com/iot-go-sdk/pkg/mqtt"
@@ -23,7 +25,8 @@ func main() {
 	cfg.MQTT.Port = 8883
 	cfg.MQTT.UseTLS = true
 
-	cfg.TLS.SkipVerify = false
+	cfg.TLS.SkipVerify = false  // 使用内置CA证书验证
+	cfg.TLS.ServerName = "IoT"  // 匹配证书CN
 
 	mqttClient := mqtt.NewClient(cfg)
 
@@ -66,6 +69,37 @@ func main() {
 
 	log.Println("RRPC client started. Waiting for requests...")
 	log.Println("Registered handlers: LightSwitch, GetStatus")
+
+	// Subscribe to a test topic to verify MQTT is working
+	testTopic := "/" + cfg.Device.ProductKey + "/" + cfg.Device.DeviceName + "/user/test"
+	if err := mqttClient.Subscribe(testTopic, 0, func(topic string, payload []byte) {
+		log.Printf("Received test message on topic %s: %s", topic, string(payload))
+	}); err != nil {
+		log.Printf("Failed to subscribe to test topic: %v", err)
+	} else {
+		log.Printf("Also subscribed to test topic: %s", testTopic)
+	}
+
+	// Periodically check connection status and publish heartbeat
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if mqttClient.IsConnected() {
+				log.Println("MQTT connection status: CONNECTED")
+				// Publish a heartbeat message
+				heartbeatTopic := "/" + cfg.Device.ProductKey + "/" + cfg.Device.DeviceName + "/user/heartbeat"
+				heartbeatMsg := fmt.Sprintf(`{"timestamp": %d, "status": "alive"}`, time.Now().Unix())
+				if err := mqttClient.Publish(heartbeatTopic, []byte(heartbeatMsg), 0, false); err != nil {
+					log.Printf("Failed to publish heartbeat: %v", err)
+				} else {
+					log.Printf("Published heartbeat to %s", heartbeatTopic)
+				}
+			} else {
+				log.Println("MQTT connection status: DISCONNECTED")
+			}
+		}
+	}()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

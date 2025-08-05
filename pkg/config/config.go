@@ -31,6 +31,7 @@ type TLSConfig struct {
 	ClientCert string
 	ClientKey  string
 	SkipVerify bool
+	ServerName string
 }
 
 type Config struct {
@@ -94,6 +95,9 @@ func (c *Config) LoadFromEnv() error {
 		if skipVerify, err := strconv.ParseBool(val); err == nil {
 			c.TLS.SkipVerify = skipVerify
 		}
+	}
+	if val := os.Getenv("IOT_TLS_SERVER_NAME"); val != "" {
+		c.TLS.ServerName = val
 	}
 	if val := os.Getenv("IOT_MQTT_SECURE_MODE"); val != "" {
 		c.MQTT.SecureMode = val
