@@ -45,6 +45,11 @@ const (
 	EventDeviceUpdate  EventType = "device.update"
 )
 
+// Custom events
+const (
+	EventCustom EventType = "custom"
+)
+
 // Event represents a system or business event
 type Event struct {
 	ID        string                 `json:"id"`

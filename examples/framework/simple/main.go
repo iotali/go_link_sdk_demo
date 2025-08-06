@@ -1,10 +1,7 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"log"
-	"math/rand"
 	"time"
 
 	"github.com/iot-go-sdk/pkg/config"
@@ -13,222 +10,9 @@ import (
 	"github.com/iot-go-sdk/pkg/framework/plugins/mqtt"
 )
 
-// SmartSensor represents a smart temperature and humidity sensor
-type SmartSensor struct {
-	core.BaseDevice
-
-	// Sensor data
-	temperature float64
-	humidity    float64
-	online      bool
-
-	// Framework reference
-	framework core.Framework
-
-	// Simulation ticker
-	ticker *time.Ticker
-}
-
-// NewSmartSensor creates a new smart sensor device
-func NewSmartSensor(productKey, deviceName, deviceSecret string) *SmartSensor {
-	return &SmartSensor{
-		BaseDevice: core.BaseDevice{
-			DeviceInfo: core.DeviceInfo{
-				ProductKey:   productKey,
-				DeviceName:   deviceName,
-				DeviceSecret: deviceSecret,
-				Model:        "SmartSensor-1000",
-				Version:      "1.0.0",
-			},
-		},
-		temperature: 25.0,
-		humidity:    60.0,
-		online:      false,
-	}
-}
-
-// OnInitialize is called when the device is initialized
-func (s *SmartSensor) OnInitialize(ctx context.Context) error {
-	log.Printf("[%s] Initializing smart sensor...", s.DeviceInfo.DeviceName)
-
-	// Register properties
-	s.framework.RegisterProperty("temperature", s.getTemperature, nil)
-	s.framework.RegisterProperty("humidity", s.getHumidity, nil)
-	s.framework.RegisterProperty("online", s.getOnline, nil)
-
-	// Register services
-	s.framework.RegisterService("calibrate", s.calibrate)
-	s.framework.RegisterService("reset", s.reset)
-
-	// Start sensor simulation (generate random data)
-	s.startSimulation()
-
-	return nil
-}
-
-// OnConnect is called when the device connects to the platform
-func (s *SmartSensor) OnConnect(ctx context.Context) error {
-	log.Printf("[%s] Connected to IoT platform", s.DeviceInfo.DeviceName)
-	s.online = true
-
-	// Report initial state
-	s.reportStatus()
-
-	return nil
-}
-
-// OnDisconnect is called when the device disconnects from the platform
-func (s *SmartSensor) OnDisconnect(ctx context.Context) error {
-	log.Printf("[%s] Disconnected from IoT platform", s.DeviceInfo.DeviceName)
-	s.online = false
-	return nil
-}
-
-// OnDestroy is called when the device is being destroyed
-func (s *SmartSensor) OnDestroy(ctx context.Context) error {
-	log.Printf("[%s] Destroying smart sensor...", s.DeviceInfo.DeviceName)
-
-	// Stop simulation
-	if s.ticker != nil {
-		s.ticker.Stop()
-	}
-
-	return nil
-}
-
-// OnPropertySet handles property set requests from the cloud
-func (s *SmartSensor) OnPropertySet(property core.Property) error {
-	log.Printf("[%s] Property set request: %s = %v", s.DeviceInfo.DeviceName, property.Name, property.Value)
-
-	// In this example, we don't allow setting sensor values from cloud
-	return fmt.Errorf("sensor values are read-only")
-}
-
-// OnServiceInvoke handles service invocation from the cloud
-func (s *SmartSensor) OnServiceInvoke(service core.ServiceRequest) (core.ServiceResponse, error) {
-	log.Printf("[%s] Service invoke: %s with params %v", s.DeviceInfo.DeviceName, service.Service, service.Params)
-
-	response := core.ServiceResponse{
-		ID:        service.ID,
-		Timestamp: time.Now(),
-	}
-
-	switch service.Service {
-	case "calibrate":
-		offset := 0.0
-		if val, ok := service.Params["offset"].(float64); ok {
-			offset = val
-		}
-		s.temperature += offset
-		response.Code = 0
-		response.Data = map[string]interface{}{
-			"message": fmt.Sprintf("Calibrated with offset %.2f", offset),
-		}
-
-	case "reset":
-		s.temperature = 25.0
-		s.humidity = 60.0
-		response.Code = 0
-		response.Data = map[string]interface{}{
-			"message": "Sensor reset to default values",
-		}
-
-	default:
-		response.Code = -1
-		response.Message = fmt.Sprintf("Unknown service: %s", service.Service)
-	}
-
-	return response, nil
-}
-
-// Property getters
-func (s *SmartSensor) getTemperature() interface{} {
-	return s.temperature
-}
-
-func (s *SmartSensor) getHumidity() interface{} {
-	return s.humidity
-}
-
-func (s *SmartSensor) getOnline() interface{} {
-	return s.online
-}
-
-// Service handlers
-func (s *SmartSensor) calibrate(params map[string]interface{}) (interface{}, error) {
-	offset := 0.0
-	if val, ok := params["offset"].(float64); ok {
-		offset = val
-	}
-
-	s.temperature += offset
-
-	return map[string]interface{}{
-		"success": true,
-		"message": fmt.Sprintf("Temperature calibrated by %.2f degrees", offset),
-	}, nil
-}
-
-func (s *SmartSensor) reset(params map[string]interface{}) (interface{}, error) {
-	s.temperature = 25.0
-	s.humidity = 60.0
-
-	return map[string]interface{}{
-		"success": true,
-		"message": "Sensor values reset to defaults",
-	}, nil
-}
-
-// startSimulation starts generating random sensor data
-func (s *SmartSensor) startSimulation() {
-	s.ticker = time.NewTicker(10 * time.Second)
-
-	go func() {
-		for range s.ticker.C {
-			// Generate random variations
-			s.temperature += (rand.Float64() - 0.5) * 2 // ±1 degree
-			s.humidity += (rand.Float64() - 0.5) * 5    // ±2.5%
-
-			// Keep values in reasonable range
-			if s.temperature < 15 {
-				s.temperature = 15
-			} else if s.temperature > 35 {
-				s.temperature = 35
-			}
-
-			if s.humidity < 30 {
-				s.humidity = 30
-			} else if s.humidity > 90 {
-				s.humidity = 90
-			}
-
-			// Report if online
-			if s.online {
-				s.reportStatus()
-			}
-		}
-	}()
-}
-
-// reportStatus reports current sensor status to the platform
-func (s *SmartSensor) reportStatus() {
-	log.Printf("[%s] Reporting status: temp=%.2f°C, humidity=%.2f%%",
-		s.DeviceInfo.DeviceName, s.temperature, s.humidity)
-
-	err := s.framework.ReportProperties(map[string]interface{}{
-		"temperature": s.temperature,
-		"humidity":    s.humidity,
-		"online":      s.online,
-	})
-
-	if err != nil {
-		log.Printf("[%s] Failed to report properties: %v", s.DeviceInfo.DeviceName, err)
-	}
-}
+// Note: Device implementation moved to electric_oven.go
 
 func main() {
-	// Set random seed
-	rand.Seed(time.Now().UnixNano())
 
 	// Create SDK configuration for MQTT plugin
 	sdkConfig := config.NewConfig()
@@ -288,15 +72,15 @@ func main() {
 		log.Fatalf("Failed to load MQTT plugin: %v", err)
 	}
 
-	// Create and register device
-	sensor := NewSmartSensor(
+	// Create and register electric oven device
+	oven := NewElectricOven(
 		frameworkConfig.Device.ProductKey,
 		frameworkConfig.Device.DeviceName,
 		frameworkConfig.Device.DeviceSecret,
 	)
-	sensor.framework = framework
+	oven.SetFramework(framework)
 
-	if err := framework.RegisterDevice(sensor); err != nil {
+	if err := framework.RegisterDevice(oven); err != nil {
 		log.Fatalf("Failed to register device: %v", err)
 	}
 
@@ -326,11 +110,11 @@ func main() {
 		log.Fatalf("Failed to start framework: %v", err)
 	}
 
-	log.Println("Smart sensor demo started. Press Ctrl+C to exit.")
+	log.Println("Electric oven demo started. Press Ctrl+C to exit.")
 	log.Println("Connecting to IoT platform via MQTT...")
 
 	// Wait for shutdown
 	framework.WaitForShutdown()
 
-	log.Println("Smart sensor demo stopped.")
+	log.Println("Electric oven demo stopped.")
 }

@@ -140,6 +140,24 @@ func (p *MQTTPlugin) registerEventHandlers() {
 		
 		return p.sendServiceResponse(response)
 	})
+	
+	// Handle custom events (for device events like overheat alarm)
+	p.framework.On(event.EventCustom, func(evt *event.Event) error {
+		eventData, ok := evt.Data.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid event data")
+		}
+		
+		// Check if it's an event that needs to be reported
+		if eventType, ok := eventData["event_type"].(string); ok {
+			switch eventType {
+			case "overheat_alarm", "timer_complete":
+				return p.reportEvent(eventData)
+			}
+		}
+		
+		return nil
+	})
 }
 
 // subscribeToTopics subscribes to all necessary MQTT topics
@@ -361,6 +379,36 @@ func (p *MQTTPlugin) handleEventReportReply(topic string, payload []byte) {
 	if reply.Code != 200 {
 		p.logger.Printf("[MQTT Plugin] Event report failed with code %d: %s", reply.Code, reply.Msg)
 	}
+}
+
+// reportEvent reports an event to the cloud
+func (p *MQTTPlugin) reportEvent(eventData map[string]interface{}) error {
+	eventType, _ := eventData["event_type"].(string)
+	
+	// Create event message in Thing Model format
+	msg := map[string]interface{}{
+		"id":      fmt.Sprintf("%d", time.Now().Unix()),
+		"version": "1.0",
+		"params": map[string]interface{}{
+			"eventType": eventType,
+			"value":     eventData["data"],
+			"time":      eventData["timestamp"],
+		},
+		"method": fmt.Sprintf("thing.event.%s.post", eventType),
+	}
+	
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event: %w", err)
+	}
+	
+	// Publish to event report topic
+	if err := p.client.Publish(p.eventReportTopic, data, 0, false); err != nil {
+		return fmt.Errorf("failed to publish event: %w", err)
+	}
+	
+	p.logger.Printf("[MQTT Plugin] Reported event %s to %s: %s", eventType, p.eventReportTopic, string(data))
+	return nil
 }
 
 // GetClient returns the underlying MQTT client (for advanced usage)
