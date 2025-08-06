@@ -14,7 +14,7 @@ import (
 )
 
 // Current firmware version - should be read from device config in production
-const currentVersion = "1.0.0"
+const currentVersion = "1.0.2"
 
 // File to save downloaded firmware - in production, write to flash
 const firmwareFile = "firmware.bin"
@@ -31,7 +31,7 @@ func main() {
 	cfg.MQTT.Host = "121.41.43.80"
 	cfg.MQTT.Port = 8883
 	cfg.MQTT.UseTLS = true
-	cfg.TLS.SkipVerify = true  // Skip certificate verification for self-signed cert
+	cfg.TLS.SkipVerify = true // Skip certificate verification for self-signed cert
 
 	// Create MQTT client
 	mqttClient := mqtt.NewClient(cfg)
@@ -60,7 +60,7 @@ func main() {
 			log.Printf("  Size: %d bytes", task.Size)
 			log.Printf("  URL: %s", task.URL)
 			log.Printf("  Digest: %s", task.ExpectDigest)
-			
+
 			if task.ExtraData != "" {
 				log.Printf("  Extra data: %s", task.ExtraData)
 			}
@@ -69,26 +69,15 @@ func main() {
 			firmwareData = make([]byte, 0, task.Size)
 			lastPercent = 0
 
-			// Start downloading firmware in two parts (like C SDK example)
+			// Start downloading firmware
 			go func() {
 				ctx := context.Background()
-				
-				// Download first half
-				halfSize := task.Size / 2
-				log.Printf("Downloading first half (0-%d)...", halfSize)
-				
-				if err := client.Download(ctx, task, 0, halfSize); err != nil {
-					log.Printf("Failed to download first half: %v", err)
-					// Report failure to cloud
-					client.ReportProgress("-2", "Download failed", -2, task.Module)
-					return
-				}
 
-				// Download second half
-				log.Printf("Downloading second half (%d-%d)...", halfSize+1, task.Size)
-				
-				if err := client.Download(ctx, task, halfSize+1, 0); err != nil {
-					log.Printf("Failed to download second half: %v", err)
+				// Download complete firmware at once
+				log.Printf("Downloading firmware (%d bytes)...", task.Size)
+
+				if err := client.Download(ctx, task, 0, 0); err != nil {
+					log.Printf("Failed to download firmware: %v", err)
 					// Report failure to cloud
 					client.ReportProgress("-2", "Download failed", -2, task.Module)
 					return
@@ -96,27 +85,39 @@ func main() {
 
 				log.Printf("Download completed successfully")
 
+				// Report 100% download complete
+				if err := client.ReportProgress("100", "Download completed", 100, task.Module); err != nil {
+					log.Printf("Failed to report download completion: %v", err)
+				}
+
 				// Save firmware to file (in production, write to flash)
 				if err := os.WriteFile(firmwareFile, firmwareData, 0644); err != nil {
 					log.Printf("Failed to save firmware: %v", err)
-					// Report burn failure
+					// Report burn failure (-4 means burn failed according to C SDK)
 					client.ReportProgress("-4", "Burn failed", -4, task.Module)
 					return
 				}
 
 				log.Printf("Firmware saved to %s", firmwareFile)
 
-				// TODO: In production, you would:
-				// 1. Verify the firmware
-				// 2. Save current state
-				// 3. Reboot device
+				// In production, you would:
+				// 1. Verify the firmware integrity
+				// 2. Save current state for rollback
+				// 3. Reboot device with new firmware
 				// 4. Boot with new firmware
-				// 5. Report new version after successful boot
+				// 5. After successful boot, report new version
 
-				// For demo, just report the new version
-				log.Printf("Reporting new version: %s", task.Version)
-				if err := client.ReportVersion(task.Version); err != nil {
+				// Simulate upgrade process
+				log.Printf("Simulating firmware upgrade...")
+
+				// For demo, immediately report the new version (in production, this would be after reboot)
+				log.Printf("Upgrade successful, reporting new version: %s (module: %s)", task.Version, task.Module)
+				if err := client.ReportVersionWithModule(task.Version, task.Module); err != nil {
 					log.Printf("Failed to report new version: %v", err)
+					// Report upgrade failure (-1 means upgrade failed according to C SDK)
+					client.ReportProgress("-1", "Upgrade failed", -1, task.Module)
+				} else {
+					log.Printf("Successfully reported new version to IoT platform")
 				}
 			}()
 
@@ -130,6 +131,7 @@ func main() {
 	otaClient.SetDownloadHandler(func(percent int, data []byte, err error) {
 		if err != nil {
 			log.Printf("Download error: %v", err)
+			// Don't report error here, let the main download function handle it
 			return
 		}
 
@@ -139,14 +141,14 @@ func main() {
 		}
 
 		// Report progress every 5% or at 100%
-		if percent-lastPercent >= 5 || percent == 100 {
+		if percent-lastPercent >= 5 {
 			log.Printf("Download progress: %d%% (%d bytes)", percent, len(firmwareData))
-			
-			// Report progress to cloud
+
+			// Report progress to cloud (C SDK reports during download, not at 100%)
 			if err := otaClient.ReportProgress(fmt.Sprintf("%d", percent), "Downloading", percent, ""); err != nil {
 				log.Printf("Failed to report progress: %v", err)
 			}
-			
+
 			lastPercent = percent
 		}
 	})

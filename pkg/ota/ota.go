@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,19 +111,20 @@ func (c *Client) SetDownloadHandler(handler DownloadHandler) {
 
 // Start starts the OTA client
 func (c *Client) Start() error {
-	// Subscribe to OTA topics using wildcards like C SDK
-	// This allows receiving messages for any productKey/deviceName combination
-	fotaTopic := "/ota/device/upgrade/+/+"
+	// Subscribe to specific OTA topics for this device
+	// Using specific productKey/deviceName instead of wildcards for better compatibility
+	fotaTopic := fmt.Sprintf("/ota/device/upgrade/%s/%s", c.productKey, c.deviceName)
 	if err := c.mqttClient.Subscribe(fotaTopic, 0, c.handleOTAMessage); err != nil {
 		return fmt.Errorf("failed to subscribe to FOTA topic: %w", err)
 	}
 
-	cotaTopic := "/sys/+/+/thing/config/push"
-	if err := c.mqttClient.Subscribe(cotaTopic, 0, c.handleOTAMessage); err != nil {
-		return fmt.Errorf("failed to subscribe to COTA topic: %w", err)
+	// Subscribe to firmware query reply topic
+	firmwareReplyTopic := fmt.Sprintf("/sys/%s/%s/thing/ota/firmware/get_reply", c.productKey, c.deviceName)
+	if err := c.mqttClient.Subscribe(firmwareReplyTopic, 0, c.handleOTAMessage); err != nil {
+		return fmt.Errorf("failed to subscribe to firmware reply topic: %w", err)
 	}
 
-	c.logger.Printf("OTA client started, subscribed to FOTA topic: %s and COTA topic: %s", fotaTopic, cotaTopic)
+	c.logger.Printf("OTA client started, subscribed to FOTA topic: %s and firmware reply topic: %s", fotaTopic, firmwareReplyTopic)
 	return nil
 }
 
@@ -133,30 +135,42 @@ func (c *Client) Stop() error {
 		c.downloadCancel()
 	}
 
-	// Unsubscribe from OTA topics (using same wildcards as Start)
-	fotaTopic := "/ota/device/upgrade/+/+"
+	// Unsubscribe from OTA topics (using specific topics)
+	fotaTopic := fmt.Sprintf("/ota/device/upgrade/%s/%s", c.productKey, c.deviceName)
 	c.mqttClient.Unsubscribe(fotaTopic)
 
-	cotaTopic := "/sys/+/+/thing/config/push"
-	c.mqttClient.Unsubscribe(cotaTopic)
+	firmwareReplyTopic := fmt.Sprintf("/sys/%s/%s/thing/ota/firmware/get_reply", c.productKey, c.deviceName)
+	c.mqttClient.Unsubscribe(firmwareReplyTopic)
 
 	return nil
 }
 
 // ReportVersion reports the current firmware version to the cloud
 func (c *Client) ReportVersion(version string) error {
+	// Call ReportVersionWithModule with default module
+	return c.ReportVersionWithModule(version, "default")
+}
+
+// ReportVersionWithModule reports the current firmware version with module to the cloud
+func (c *Client) ReportVersionWithModule(version string, module string) error {
 	c.mutex.Lock()
 	c.currentVersion = version
 	c.mutex.Unlock()
 
 	topic := fmt.Sprintf("/ota/device/inform/%s/%s", c.productKey, c.deviceName)
 	
+	params := map[string]interface{}{
+		"version": version,
+	}
+	
+	// Only add module if it's not empty (following C SDK behavior)
+	if module != "" {
+		params["module"] = module
+	}
+	
 	payload := map[string]interface{}{
 		"id":      fmt.Sprintf("%d", time.Now().UnixNano()),
-		"params": map[string]interface{}{
-			"version": version,
-			"module":  "",
-		},
+		"params": params,
 	}
 
 	data, err := json.Marshal(payload)
@@ -168,7 +182,11 @@ func (c *Client) ReportVersion(version string) error {
 		return fmt.Errorf("failed to publish version report: %w", err)
 	}
 
-	c.logger.Printf("Reported version: %s", version)
+	if module != "" {
+		c.logger.Printf("Reported version: %s (module: %s)", version, module)
+	} else {
+		c.logger.Printf("Reported version: %s", version)
+	}
 	return nil
 }
 
@@ -176,17 +194,20 @@ func (c *Client) ReportVersion(version string) error {
 func (c *Client) ReportProgress(step string, desc string, progress int, module string) error {
 	topic := fmt.Sprintf("/ota/device/progress/%s/%s", c.productKey, c.deviceName)
 	
+	params := map[string]interface{}{
+		"step":     step,
+		"desc":     desc,
+		"progress": progress,
+	}
+	
+	// Only add module if it's not empty (following C SDK behavior)
+	if module != "" {
+		params["module"] = module
+	}
+	
 	payload := map[string]interface{}{
 		"id":      fmt.Sprintf("%d", time.Now().UnixNano()),
-		"params": map[string]interface{}{
-			"step":     step,
-			"desc":     desc,
-			"progress": progress,
-		},
-	}
-
-	if module != "" {
-		payload["params"].(map[string]interface{})["module"] = module
+		"params": params,
 	}
 
 	data, err := json.Marshal(payload)
@@ -234,6 +255,27 @@ func (c *Client) handleOTAMessage(topic string, payload []byte) {
 		return
 	}
 
+	// Check if this is a firmware query reply
+	if strings.Contains(topic, "/thing/ota/firmware/get_reply") {
+		// This is a firmware update notification from the query
+		// Parse it as a FOTA task
+		task := c.parseTaskDesc(msg)
+		if task == nil {
+			// No firmware update available or invalid data - this is not an error
+			return
+		}
+
+		// Call user handler with FOTA type
+		c.mutex.RLock()
+		handler := c.recvHandler
+		c.mutex.RUnlock()
+
+		if handler != nil {
+			handler(c, RecvTypeFOTA, task)
+		}
+		return
+	}
+
 	// Determine message type based on topic pattern (with wildcards)
 	var recvType RecvType
 	// Check if topic matches FOTA pattern: /ota/device/upgrade/+/+
@@ -264,6 +306,12 @@ func (c *Client) handleOTAMessage(topic string, payload []byte) {
 func (c *Client) parseTaskDesc(msg map[string]interface{}) *TaskDesc {
 	data, ok := msg["data"].(map[string]interface{})
 	if !ok {
+		return nil
+	}
+
+	// Check if data is empty (no firmware update available)
+	if len(data) == 0 {
+		c.logger.Printf("No firmware update available")
 		return nil
 	}
 
@@ -306,6 +354,12 @@ func (c *Client) parseTaskDesc(msg map[string]interface{}) *TaskDesc {
 		task.ExtraData = extData
 	}
 
+	// Validate required fields for firmware update
+	if task.URL == "" || task.Size == 0 {
+		c.logger.Printf("Invalid firmware update data: missing URL or size")
+		return nil
+	}
+
 	return task
 }
 
@@ -346,12 +400,18 @@ func (c *Client) Download(ctx context.Context, task *TaskDesc, rangeStart, range
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	// Initialize hash calculator
+	// For partial downloads, we don't verify digest
+	// The digest verification should be done after downloading the complete file
+	isPartialDownload := (rangeStart > 0 || rangeEnd > 0)
+
+	// Initialize hash calculator only for full downloads
 	var hasher hash.Hash
-	if task.DigestMethod == DigestMD5 {
-		hasher = md5.New()
-	} else {
-		hasher = sha256.New()
+	if !isPartialDownload {
+		if task.DigestMethod == DigestMD5 {
+			hasher = md5.New()
+		} else {
+			hasher = sha256.New()
+		}
 	}
 
 	// Download with progress reporting
@@ -377,10 +437,13 @@ func (c *Client) Download(ctx context.Context, task *TaskDesc, rangeStart, range
 
 			if n > 0 {
 				data := buffer[:n]
-				hasher.Write(data)
+				// Only calculate hash for full downloads
+				if !isPartialDownload && hasher != nil {
+					hasher.Write(data)
+				}
 				downloaded += uint32(n)
 
-				// Calculate progress
+				// Calculate progress based on partial download size
 				percent := int(downloaded * 100 / totalSize)
 				if percent != lastPercent {
 					lastPercent = percent
@@ -389,12 +452,14 @@ func (c *Client) Download(ctx context.Context, task *TaskDesc, rangeStart, range
 			}
 
 			if err == io.EOF {
-				// Verify digest
-				digest := fmt.Sprintf("%x", hasher.Sum(nil))
-				if digest != task.ExpectDigest {
-					err := fmt.Errorf("digest mismatch: expected %s, got %s", task.ExpectDigest, digest)
-					c.notifyDownloadHandler(-3, nil, err)
-					return err
+				// Only verify digest for full downloads
+				if !isPartialDownload && hasher != nil {
+					digest := fmt.Sprintf("%x", hasher.Sum(nil))
+					if digest != task.ExpectDigest {
+						err := fmt.Errorf("digest mismatch: expected %s, got %s", task.ExpectDigest, digest)
+						c.notifyDownloadHandler(-3, nil, err)
+						return err
+					}
 				}
 
 				// Download completed
