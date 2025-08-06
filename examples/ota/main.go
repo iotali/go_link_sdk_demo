@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/iot-go-sdk/pkg/config"
@@ -13,11 +14,45 @@ import (
 	"github.com/iot-go-sdk/pkg/ota"
 )
 
-// Current firmware version - should be read from device config in production
-const currentVersion = "1.0.2"
-
 // File to save downloaded firmware - in production, write to flash
 const firmwareFile = "firmware.bin"
+
+// Version file to track current firmware version
+const versionFile = "firmware_version.txt"
+
+// Default version if version file doesn't exist
+const defaultVersion = "1.0.0"
+
+// readFirmwareVersion reads the current firmware version from file
+func readFirmwareVersion() string {
+	data, err := os.ReadFile(versionFile)
+	if err != nil {
+		log.Printf("Version file not found, using default version: %s", defaultVersion)
+		// Create version file with default version
+		writeFirmwareVersion(defaultVersion)
+		return defaultVersion
+	}
+	
+	version := strings.TrimSpace(string(data))
+	if version == "" {
+		log.Printf("Empty version file, using default version: %s", defaultVersion)
+		return defaultVersion
+	}
+	
+	log.Printf("Current firmware version: %s", version)
+	return version
+}
+
+// writeFirmwareVersion writes the firmware version to file
+func writeFirmwareVersion(version string) error {
+	err := os.WriteFile(versionFile, []byte(version), 0644)
+	if err != nil {
+		log.Printf("Failed to write version file: %v", err)
+		return err
+	}
+	log.Printf("Updated firmware version to: %s", version)
+	return nil
+}
 
 func main() {
 	cfg := config.NewConfig()
@@ -65,6 +100,11 @@ func main() {
 				log.Printf("  Extra data: %s", task.ExtraData)
 			}
 
+			// Check if this is a valid upgrade task
+			if task.Version == "" {
+				log.Printf("Warning: Version is empty, this may be an invalid upgrade task")
+			}
+
 			// Reset firmware data
 			firmwareData = make([]byte, 0, task.Size)
 			lastPercent = 0
@@ -110,6 +150,21 @@ func main() {
 				// Simulate upgrade process
 				log.Printf("Simulating firmware upgrade...")
 
+				// Check if version is empty (invalid upgrade task)
+				if task.Version == "" {
+					log.Printf("Invalid upgrade task: version is empty, skipping upgrade")
+					client.ReportProgress("-1", "Invalid version", -1, task.Module)
+					return
+				}
+
+				// Update version file with new version
+				if err := writeFirmwareVersion(task.Version); err != nil {
+					log.Printf("Failed to update version file: %v", err)
+					// Report upgrade failure (-1 means upgrade failed according to C SDK)
+					client.ReportProgress("-1", "Upgrade failed", -1, task.Module)
+					return
+				}
+
 				// For demo, immediately report the new version (in production, this would be after reboot)
 				log.Printf("Upgrade successful, reporting new version: %s (module: %s)", task.Version, task.Module)
 				if err := client.ReportVersionWithModule(task.Version, task.Module); err != nil {
@@ -118,6 +173,7 @@ func main() {
 					client.ReportProgress("-1", "Upgrade failed", -1, task.Module)
 				} else {
 					log.Printf("Successfully reported new version to IoT platform")
+					log.Printf("In production: device would reboot here and report version on next startup")
 				}
 			}()
 
@@ -160,6 +216,9 @@ func main() {
 	defer otaClient.Stop()
 
 	log.Println("OTA client started")
+
+	// Read current firmware version from file
+	currentVersion := readFirmwareVersion()
 
 	// Report current version
 	log.Printf("Reporting current version: %s", currentVersion)
