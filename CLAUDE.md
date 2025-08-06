@@ -110,9 +110,32 @@ cfg.TLS.ServerName = "IoT"  // Must match certificate CN
 
 ## Debugging and Process Management
 
+### ⚠️ Critical: ClientID Conflict Issue
+
+**Problem**: When debugging IoT applications, if you start a program in the background (using `&`) and don't properly kill it, the device will remain connected to the IoT platform. When you run the program again with the same ClientID, the two instances will kick each other offline repeatedly, causing connection instability.
+
+**Symptoms**:
+- Connection immediately drops after subscribing to topics
+- Error messages like "Connection lost: EOF" or "Disconnected from MQTT broker"
+- Device status flashing online/offline on IoT platform
+- Subscribe failures with "not currently connected and ResumeSubs not set"
+- Topics with `$` prefix causing immediate disconnection
+
+**Root Cause**: MQTT brokers only allow one connection per ClientID. When a new connection with the same ClientID connects, the broker disconnects the old one. If the old client has auto-reconnect enabled, it will reconnect and kick off the new one, creating a kick-off loop.
+
+**Solution**: Always check for and kill existing connections before starting a new instance:
+
+```bash
+# Quick cleanup before running
+lsof -i -P | grep -E "(1883|121\.40\.253\.224)" | grep -v LISTEN | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
+
+# Then run your program
+go run main.go
+```
+
 ### Finding Background IoT Connections
 
-When IoT devices appear to stay online after closing programs, use these commands to find and terminate background processes:
+**IMPORTANT**: Always check for existing connections before running a new instance. When IoT devices appear to stay online after closing programs, use these commands to find and terminate background processes:
 
 **1. Find processes by IoT platform ports:**
 ```bash
@@ -205,6 +228,54 @@ Connected to MQTT broker for dynamic registration: ssl://121.41.43.80:8883
 Received message on topic /ext/register: {"deviceSecret":"xxx"}
 ```
 
+## IoT Framework (New)
+
+The project now includes an event-driven framework in `pkg/framework/` that provides higher-level abstractions:
+
+### Framework vs SDK
+- **SDK**: Direct MQTT/HTTP operations, full control, more code
+- **Framework**: Event-driven, plugin-based, business logic focused, minimal code
+
+### Thing Model Topics
+
+The framework uses standard Thing Model topics with `$SYS/` prefix:
+
+**Property Operations**:
+- Upload: `$SYS/{ProductKey}/{DeviceName}/property/post`
+- Upload Reply: `$SYS/{ProductKey}/{DeviceName}/property/post/reply`
+- Set: `$SYS/{ProductKey}/{DeviceName}/property/set`
+- Set Reply: `$SYS/{ProductKey}/{DeviceName}/property/set/reply`
+
+**Property Message Format**:
+```json
+{
+  "id": "1754475911",
+  "version": "1.0",
+  "params": {
+    "temperature": {
+      "value": "25.5",
+      "time": 1754475911
+    },
+    "humidity": {
+      "value": "60.0",
+      "time": 1754475911
+    }
+  }
+}
+```
+
+**Event Operations**:
+- Upload: `$SYS/{ProductKey}/{DeviceName}/event/post`
+- Upload Reply: `$SYS/{ProductKey}/{DeviceName}/event/post/reply`
+
+**Service Operations**:
+- Invoke: `$SYS/{ProductKey}/{DeviceName}/service/{serviceName}/invoke`
+- Invoke Reply: `$SYS/{ProductKey}/{DeviceName}/service/{serviceName}/invoke/reply`
+
+### Framework Example
+
+See `examples/framework/simple/` for a complete smart sensor example using the framework.
+
 ## Current Limitations
 
 - No automated test suite exists
@@ -212,3 +283,4 @@ Received message on topic /ext/register: {"deviceSecret":"xxx"}
 - Documentation primarily in Chinese
 - No custom build scripts or Makefile
 - Background process management requires manual checking
+- Topics with `$` prefix may cause connection issues with some MQTT broker configurations
