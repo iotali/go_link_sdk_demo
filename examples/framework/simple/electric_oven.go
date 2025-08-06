@@ -37,8 +37,10 @@ type ElectricOven struct {
 	framework core.Framework
 
 	// Control channels
-	stopCh   chan struct{}
-	timerCh  chan struct{}
+	stopCh          chan struct{}
+	timerCh         chan struct{}
+	fastReportCh    chan bool
+	lastReportTime  time.Time
 }
 
 // NewElectricOven creates a new electric oven device
@@ -65,6 +67,7 @@ func NewElectricOven(productKey, deviceName, deviceSecret string) *ElectricOven 
 		fanStatus:        false,
 		stopCh:           make(chan struct{}),
 		timerCh:          make(chan struct{}, 1),
+		fastReportCh:     make(chan bool, 1),
 	}
 }
 
@@ -228,10 +231,20 @@ func (o *ElectricOven) setTargetTemp(value interface{}) error {
 	o.targetTemp = temp
 	if temp > 0 {
 		o.isRunning = true
-		o.operationMode = "加热中"
+		if o.remainingTime > 0 {
+			o.operationMode = "定时加热中"
+		} else if temp - o.currentTemp > 50 {
+			o.operationMode = "预热中"
+		} else {
+			o.operationMode = "加热中"
+		}
 	} else {
 		o.isRunning = false
-		o.operationMode = "待机"
+		if o.currentTemp > 50 {
+			o.operationMode = "冷却中"
+		} else {
+			o.operationMode = "待机"
+		}
 	}
 	o.mutex.Unlock()
 	
@@ -262,6 +275,15 @@ func (o *ElectricOven) setTemperatureService(params map[string]interface{}) (int
 	temp, ok := params["temperature"].(float64)
 	if !ok {
 		return nil, fmt.Errorf("invalid temperature parameter")
+	}
+	
+	// Check if door is open
+	o.mutex.RLock()
+	doorOpen := o.doorStatus
+	o.mutex.RUnlock()
+	
+	if doorOpen && temp > 0 {
+		return nil, fmt.Errorf("cannot set temperature when door is open")
 	}
 	
 	if err := o.setTargetTemp(temp); err != nil {
@@ -297,9 +319,29 @@ func (o *ElectricOven) startTimerService(params map[string]interface{}) (interfa
 	}
 	
 	o.mutex.Lock()
+	// Check if door is open
+	if o.doorStatus {
+		o.mutex.Unlock()
+		return nil, fmt.Errorf("cannot start timer when door is open")
+	}
+	
+	// If no target temperature is set, set a default one
+	if o.targetTemp == 0 {
+		o.targetTemp = 180.0 // Default temperature
+		o.isRunning = true
+		log.Printf("[%s] Auto-setting target temperature to 180°C", o.DeviceInfo.DeviceName)
+	}
+	
 	o.timerSetting = minutes
 	o.remainingTime = minutes
+	o.operationMode = "定时加热中"
 	o.mutex.Unlock()
+	
+	// Switch to fast reporting when timer starts
+	select {
+	case o.fastReportCh <- true:
+	default:
+	}
 	
 	// Trigger timer processing
 	select {
@@ -320,15 +362,44 @@ func (o *ElectricOven) toggleDoorService(params map[string]interface{}) (interfa
 	o.mutex.Lock()
 	o.doorStatus = !o.doorStatus
 	newStatus := o.doorStatus
+	timerWasRunning := o.remainingTime > 0
 	
-	// If door is opened while heating, pause heating
-	if o.doorStatus && o.isRunning {
-		o.heaterStatus = false
-		o.operationMode = "暂停（门开）"
-	} else if !o.doorStatus && o.isRunning {
-		o.operationMode = "加热中"
+	// If door is opened while heating, pause heating and stop timer
+	if o.doorStatus {
+		if o.isRunning {
+			o.heaterStatus = false
+			o.operationMode = "暂停（门开）"
+		}
+		
+		// Stop timer if it was running
+		if timerWasRunning {
+			o.remainingTime = 0
+			o.timerSetting = 0
+			log.Printf("[%s] Timer cancelled due to door opening", o.DeviceInfo.DeviceName)
+		}
+		
+		// Turn on internal light when door opens
+		o.internalLight = true
+	} else {
+		// Door closed
+		if o.isRunning && o.targetTemp > 0 {
+			o.operationMode = "加热中"
+		}
+		// Turn off internal light when door closes
+		o.internalLight = false
 	}
 	o.mutex.Unlock()
+	
+	// If timer was cancelled, switch back to normal reporting
+	if timerWasRunning && newStatus {
+		select {
+		case o.fastReportCh <- false:
+		default:
+		}
+		
+		// Report timer cancelled event
+		o.reportTimerCancelled()
+	}
 	
 	statusStr := "closed"
 	if newStatus {
@@ -399,11 +470,33 @@ func (o *ElectricOven) updateTemperature() {
 		o.fanStatus = false
 	}
 	
+	// Update operation mode based on temperature
+	if o.isRunning && o.targetTemp > 0 {
+		if o.remainingTime > 0 {
+			o.operationMode = "定时加热中"
+		} else if math.Abs(o.currentTemp - o.targetTemp) <= 5 {
+			o.operationMode = "保温中"
+		} else if o.targetTemp - o.currentTemp > 50 {
+			o.operationMode = "预热中"
+		} else {
+			o.operationMode = "加热中"
+		}
+	} else if !o.isRunning && o.currentTemp > 50 {
+		o.operationMode = "冷却中"
+	}
+	
 	// Update temperature based on heater state
 	if o.heaterStatus {
-		// Heating
-		heatingPower := maxHeatingRate * (1 - o.currentTemp/400) // Slower heating at higher temps
-		o.currentTemp += heatingPower
+		// Dynamic heating rate based on temperature difference
+		tempDiff := o.targetTemp - o.currentTemp
+		heatingRate := maxHeatingRate
+		if tempDiff < 20 {
+			heatingRate = maxHeatingRate * 0.3 // Slow heating when close to target
+		} else if tempDiff < 50 {
+			heatingRate = maxHeatingRate * 0.6 // Medium heating
+		}
+		heatingRate *= (1 - o.currentTemp/400) // Slower at higher temps
+		o.currentTemp += heatingRate
 		o.powerConsumption = 2000 + 500*math.Sin(o.currentTemp/50) // Varying power
 	} else {
 		// Cooling towards room temperature
@@ -459,6 +552,13 @@ func (o *ElectricOven) timerCountdownLoop() {
 					
 					// Report timer completion event
 					o.mutex.Unlock()
+					
+					// Switch back to normal reporting
+					select {
+					case o.fastReportCh <- false:
+					default:
+					}
+					
 					o.reportTimerComplete()
 					o.reportFullStatus()
 				} else {
@@ -473,15 +573,50 @@ func (o *ElectricOven) timerCountdownLoop() {
 
 // statusReportingLoop periodically reports device status
 func (o *ElectricOven) statusReportingLoop() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	normalTicker := time.NewTicker(30 * time.Second)
+	defer normalTicker.Stop()
+	
+	var fastTicker *time.Ticker
+	fastMode := false
 	
 	for {
 		select {
 		case <-o.stopCh:
+			if fastTicker != nil {
+				fastTicker.Stop()
+			}
 			return
-		case <-ticker.C:
-			o.reportFullStatus()
+			
+		case enable := <-o.fastReportCh:
+			if enable && !fastMode {
+				// Switch to fast reporting (2 seconds)
+				log.Printf("[%s] Switching to fast reporting mode (2s)", o.DeviceInfo.DeviceName)
+				fastMode = true
+				fastTicker = time.NewTicker(2 * time.Second)
+			} else if !enable && fastMode {
+				// Switch back to normal reporting (30 seconds)
+				log.Printf("[%s] Switching to normal reporting mode (30s)", o.DeviceInfo.DeviceName)
+				fastMode = false
+				if fastTicker != nil {
+					fastTicker.Stop()
+					fastTicker = nil
+				}
+			}
+			
+		case <-normalTicker.C:
+			if !fastMode {
+				o.reportFullStatus()
+			}
+			
+		case <-func() <-chan time.Time {
+			if fastTicker != nil {
+				return fastTicker.C
+			}
+			return make(chan time.Time)
+		}():
+			if fastMode {
+				o.reportFullStatus()
+			}
 		}
 	}
 }
@@ -554,6 +689,26 @@ func (o *ElectricOven) reportTimerComplete() {
 	evt := event.NewEvent(event.EventCustom, o.DeviceInfo.DeviceName, eventData)
 	if err := o.framework.Emit(evt); err != nil {
 		log.Printf("[%s] Failed to emit timer complete event: %v", o.DeviceInfo.DeviceName, err)
+	}
+}
+
+// reportTimerCancelled reports timer cancellation event
+func (o *ElectricOven) reportTimerCancelled() {
+	log.Printf("[%s] Timer cancelled", o.DeviceInfo.DeviceName)
+	
+	// Create timer cancelled event
+	eventData := map[string]interface{}{
+		"event_type": "timer_cancelled",
+		"data": map[string]interface{}{
+			"message": "Timer was cancelled due to door opening",
+		},
+		"timestamp": time.Now().Unix(),
+	}
+	
+	// Emit event through framework
+	evt := event.NewEvent(event.EventCustom, o.DeviceInfo.DeviceName, eventData)
+	if err := o.framework.Emit(evt); err != nil {
+		log.Printf("[%s] Failed to emit timer cancelled event: %v", o.DeviceInfo.DeviceName, err)
 	}
 }
 
