@@ -13,19 +13,27 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}电烤炉模拟器运行和测试脚本${NC}"
 echo -e "${GREEN}========================================${NC}"
 
+# Get script directory and SDK root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SDK_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
 # 1. 清理可能存在的连接
 echo -e "\n${YELLOW}步骤1: 清理现有连接...${NC}"
 lsof -i -P | grep -E "(1883|121\.40\.253\.224)" | grep -v LISTEN | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
-sleep 1
+sleep 2
 
-# 2. 编译程序
+# 2. 编译程序 (从SDK根目录)
 echo -e "\n${YELLOW}步骤2: 编译电烤炉程序...${NC}"
-go build -o electric_oven_demo .
+cd "$SDK_ROOT"
+go build -o "$SCRIPT_DIR/electric_oven_demo" examples/framework/simple/main.go examples/framework/simple/electric_oven.go
 if [ $? -ne 0 ]; then
     echo -e "${RED}编译失败！${NC}"
     exit 1
 fi
 echo -e "${GREEN}编译成功！${NC}"
+
+# Return to script directory for execution
+cd "$SCRIPT_DIR"
 
 # 3. 启动电烤炉程序
 echo -e "\n${YELLOW}步骤3: 启动电烤炉程序...${NC}"

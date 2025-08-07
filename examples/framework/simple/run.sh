@@ -1,35 +1,27 @@
 #!/bin/bash
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Get the SDK root directory (3 levels up from examples/framework/simple)
+SDK_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
 # Kill any existing processes connected to IoT platform
 echo "Checking for existing connections..."
-EXISTING_PID=$(lsof -i -P | grep -E "(1883|121\.40\.253\.224)" | grep -v LISTEN | awk '{print $2}' | head -1)
+EXISTING_PIDS=$(lsof -i -P | grep -E "(1883|121\.40\.253\.224)" | grep -v LISTEN | awk '{print $2}' | sort -u)
 
-if [ ! -z "$EXISTING_PID" ]; then
-    echo "Found existing connection with PID: $EXISTING_PID"
-    echo "Killing existing process..."
-    kill -9 $EXISTING_PID
-    sleep 1
+if [ ! -z "$EXISTING_PIDS" ]; then
+    echo "Found existing connections with PIDs: $EXISTING_PIDS"
+    echo "Killing existing processes..."
+    echo "$EXISTING_PIDS" | xargs -r kill -9 2>/dev/null || true
+    sleep 2
 fi
 
-# Run the application
+# Change to SDK root directory
+cd "$SDK_ROOT"
+
+# Run the application with both source files
 echo "Starting IoT framework demo..."
 echo "Press Ctrl+C to stop..."
 
-# Run in background and capture PID
-go run main.go &
-PID=$!
-
-# Function to cleanup on exit
-cleanup() {
-    echo -e "\nStopping demo..."
-    kill $PID 2>/dev/null || true
-    wait $PID 2>/dev/null || true
-    echo "Demo stopped."
-    exit 0
-}
-
-# Trap Ctrl+C
-trap cleanup INT
-
-# Wait for the process
-wait $PID
+# Run the application directly (not in background for better signal handling)
+exec go run examples/framework/simple/main.go examples/framework/simple/electric_oven.go
