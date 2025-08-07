@@ -13,6 +13,9 @@
 - ✅ **自动重连**: 网络断开自动重连机制
 - ✅ **证书管理**: 自定义 CA 证书支持
 - ✅ **安全模式**: 支持 securemode=2/3，自动适配 TLS/非TLS 连接
+- ✅ **IoT Framework**: 事件驱动框架，提供更高层次的抽象
+- ✅ **物模型支持**: 完整的属性、服务、事件支持
+- ✅ **插件化架构**: 模块化设计，支持按需扩展
 
 ## 快速开始
 
@@ -138,6 +141,98 @@ rrpcClient.RegisterHandler("LightSwitch", func(requestId string, payload []byte)
 rrpcClient.Start()
 ```
 
+## IoT Framework（新增）
+
+基于事件驱动的 IoT 框架，提供更高层次的抽象，让开发者可以专注于业务逻辑而不必关心底层连接、协议等细节。
+
+### 框架特性
+
+- **事件驱动架构**: 基于事件总线的异步消息处理
+- **插件化设计**: 核心功能模块化，支持按需加载
+- **物模型支持**: 完整的属性、服务、事件处理
+- **生命周期管理**: 完整的设备和框架生命周期管理
+- **并发控制**: 基于 worker pool 的高效事件处理
+
+### 快速上手
+
+```go
+import (
+    "github.com/iot-go-sdk/pkg/framework/core"
+    "github.com/iot-go-sdk/pkg/framework/event"
+    "github.com/iot-go-sdk/pkg/framework/plugins/mqtt"
+)
+
+// 创建框架配置
+frameworkConfig := core.Config{
+    Device: core.DeviceConfig{
+        ProductKey:   "YourProductKey",
+        DeviceName:   "YourDeviceName",
+        DeviceSecret: "YourDeviceSecret",
+    },
+    MQTT: core.MQTTConfig{
+        Host: "your_mqtt_host",
+        Port: 1883,
+    },
+}
+
+// 创建框架实例
+framework := core.New(frameworkConfig)
+
+// 初始化并加载 MQTT 插件
+framework.Initialize(frameworkConfig)
+mqttPlugin := mqtt.NewMQTTPlugin(sdkConfig)
+framework.LoadPlugin(mqttPlugin)
+
+// 注册设备
+device := NewYourDevice()
+framework.RegisterDevice(device)
+
+// 注册事件处理器
+framework.On(event.EventConnected, func(evt *event.Event) error {
+    log.Println("Connected to IoT platform")
+    return nil
+})
+
+// 启动框架
+framework.Start()
+framework.WaitForShutdown()
+```
+
+### 设备实现
+
+```go
+type MyDevice struct {
+    core.BaseDevice
+    temperature float64
+}
+
+// 实现设备接口
+func (d *MyDevice) OnPropertySet(property core.Property) error {
+    // 处理属性设置
+    return nil
+}
+
+func (d *MyDevice) OnServiceInvoke(service string, params map[string]interface{}) (interface{}, error) {
+    // 处理服务调用
+    return nil, nil
+}
+```
+
+### 框架示例 - 智能电烤炉
+
+`examples/framework/simple/` 目录包含一个功能完整的智能电烤炉实现：
+
+- **属性管理**: 温度、加热器状态、门状态等
+- **服务实现**: 设置温度、启动定时器、切换门状态
+- **事件上报**: 定时器完成、过热警告等
+- **动态行为**: 根据状态智能调整上报频率（正常30秒，活跃2秒）
+
+```bash
+cd examples/framework/simple
+go build -o oven .
+./oven
+```
+
 ## 项目结构
 
 ```
@@ -148,13 +243,21 @@ iot-go-sdk/
 │   ├── mqtt/            # MQTT 客户端
 │   ├── dynreg/          # 动态注册
 │   ├── rrpc/            # RRPC 功能
-│   └── tls/             # TLS 证书管理
+│   ├── tls/             # TLS 证书管理
+│   └── framework/       # IoT 框架
+│       ├── core/        # 框架核心
+│       ├── event/       # 事件系统
+│       ├── device/      # 设备抽象
+│       └── plugins/     # 插件系统
+│           └── mqtt/    # MQTT 插件
 ├── examples/            # 示例代码
 │   ├── basic_mqtt/      # 基础 MQTT 连接示例
 │   ├── tls_mqtt/        # TLS MQTT 连接示例
 │   ├── dynreg_http/     # HTTP 动态注册示例
 │   ├── dynreg_mqtt/     # MQTT 动态注册示例
-│   └── rrpc/            # RRPC 示例
+│   ├── rrpc/            # RRPC 示例
+│   └── framework/       # 框架示例
+│       └── simple/      # 智能设备示例
 └── README.md
 ```
 
@@ -193,6 +296,14 @@ go run main.go
 ```bash
 cd examples/rrpc
 go run main.go
+```
+
+### 框架示例
+
+```bash
+cd examples/framework/simple
+go build -o oven .
+./oven
 ```
 
 ## 配置参数
@@ -285,6 +396,9 @@ client.SetLogger(logger)
 | 二进制数据传输 | ✅ | ✅ | 完成 |
 | 自动重连 | ✅ | ✅ | 完成 |
 | 安全模式支持 | ✅ | ✅ | 完成 |
+| 物模型支持 | ✅ | ✅ | 完成 |
+| 事件驱动框架 | ❌ | ✅ | 完成 |
+| 插件化架构 | ❌ | ✅ | 完成 |
 
 ## 开发进展
 
@@ -296,6 +410,15 @@ client.SetLogger(logger)
 - **动态注册**: HTTP 和 MQTT 两种动态注册方式
 - **RRPC 功能**: 远程过程调用，支持多种处理器
 - **安全模式**: 自动适配 securemode=2/3
+
+#### ✅ IoT Framework 实现
+
+**事件驱动框架**
+- **核心组件**: EventBus、PluginManager、DeviceManager
+- **MQTT 插件**: 完整集成，支持物模型通信
+- **服务路由**: 修复了服务调用路由机制（topic 解析问题）
+- **事件上报**: 支持自定义事件类型上报
+- **动态频率**: 根据设备状态智能调整上报频率
 
 #### ✅ 重要发现和修复
 
@@ -342,6 +465,7 @@ client.SetLogger(logger)
 - **并发安全**: 所有操作线程安全
 - **错误处理**: 完整的错误处理机制
 - **日志系统**: 可配置的分级日志
+- **框架集成**: 事件驱动框架与 SDK 无缝集成
 
 ## 许可证
 

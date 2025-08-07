@@ -240,12 +240,13 @@ func (p *MQTTPlugin) handleServiceCall(topic string, payload []byte) {
 	p.logger.Printf("[MQTT Plugin] Service call message on topic %s: %s", topic, string(payload))
 	
 	// Extract service name from topic
+	// Topic format: $SYS/{ProductKey}/{DeviceName}/service/{ServiceName}/invoke
 	parts := strings.Split(topic, "/")
 	if len(parts) < 6 {
 		p.logger.Printf("[MQTT Plugin] Invalid service topic: %s", topic)
 		return
 	}
-	serviceName := parts[5]
+	serviceName := parts[4] // Service name is at index 4, not 5
 	
 	var msg struct {
 		ID     string                 `json:"id"`
