@@ -13,16 +13,18 @@ import (
 	"github.com/iot-go-sdk/pkg/framework/event"
 	"github.com/iot-go-sdk/pkg/framework/plugin"
 	"github.com/iot-go-sdk/pkg/mqtt"
+	"github.com/iot-go-sdk/pkg/rrpc"
 )
 
 // MQTTPlugin provides MQTT connectivity for the framework
 type MQTTPlugin struct {
 	plugin.BasePlugin
 
-	client    *mqtt.Client
-	config    *config.Config
-	framework core.Framework
-	logger    *log.Logger
+	client     *mqtt.Client
+	rrpcClient *rrpc.RRPCClient
+	config     *config.Config
+	framework  core.Framework
+	logger     *log.Logger
 
 	// Topic mappings
 	propertySetTopic         string
@@ -91,6 +93,20 @@ func (p *MQTTPlugin) Start() error {
 
 	p.logger.Printf("[MQTT Plugin] Connected to MQTT broker at %s:%d", p.config.MQTT.Host, p.config.MQTT.Port)
 
+	// Initialize and start RRPC client
+	p.rrpcClient = rrpc.NewRRPCClient(p.client, p.config.Device.ProductKey, p.config.Device.DeviceName)
+	p.rrpcClient.SetLogger(p.logger)
+	
+	// Register RRPC handlers from framework
+	p.registerRRPCHandlers()
+	
+	if err := p.rrpcClient.Start(); err != nil {
+		p.logger.Printf("[MQTT Plugin] Warning: Failed to start RRPC client: %v", err)
+		// Continue without RRPC support
+	} else {
+		p.logger.Println("[MQTT Plugin] RRPC client started successfully")
+	}
+
 	// Subscribe to topics
 	if err := p.subscribeToTopics(); err != nil {
 		p.client.Disconnect()
@@ -106,6 +122,12 @@ func (p *MQTTPlugin) Start() error {
 // Stop stops the plugin
 func (p *MQTTPlugin) Stop() error {
 	p.logger.Println("[MQTT Plugin] Stopping...")
+
+	// Stop RRPC client
+	if p.rrpcClient != nil {
+		p.rrpcClient.Stop()
+		p.logger.Println("[MQTT Plugin] RRPC client stopped")
+	}
 
 	// Emit disconnected event
 	p.framework.Emit(event.NewEvent(event.EventDisconnected, "mqtt", nil))
@@ -418,4 +440,62 @@ func (p *MQTTPlugin) reportEvent(eventData map[string]interface{}) error {
 // GetClient returns the underlying MQTT client (for advanced usage)
 func (p *MQTTPlugin) GetClient() *mqtt.Client {
 	return p.client
+}
+
+// RegisterRRPCHandler registers a handler for RRPC requests
+func (p *MQTTPlugin) RegisterRRPCHandler(method string, handler func(requestId string, payload []byte) ([]byte, error)) {
+	if p.rrpcClient != nil {
+		p.rrpcClient.RegisterHandler(method, handler)
+		p.logger.Printf("[MQTT Plugin] Registered RRPC handler for method: %s", method)
+	}
+}
+
+// registerRRPCHandlers registers framework-level RRPC handlers
+func (p *MQTTPlugin) registerRRPCHandlers() {
+	// Register a default handler that routes RRPC requests to framework services
+	p.rrpcClient.RegisterHandler("InvokeService", func(requestId string, payload []byte) ([]byte, error) {
+		// Parse the request
+		var request struct {
+			Service string                 `json:"service"`
+			Params  map[string]interface{} `json:"params"`
+		}
+		
+		if err := json.Unmarshal(payload, &request); err != nil {
+			return nil, fmt.Errorf("invalid request format: %w", err)
+		}
+		
+		// Create a service request and emit it to the framework
+		serviceReq := core.ServiceRequest{
+			ID:        requestId,
+			Service:   request.Service,
+			Params:    request.Params,
+			Timestamp: time.Now(),
+		}
+		
+		// Emit service call event
+		evt := event.NewEvent(event.EventServiceCall, "rrpc", serviceReq)
+		if err := p.framework.Emit(evt); err != nil {
+			return nil, fmt.Errorf("service invocation failed: %w", err)
+		}
+		
+		// For now, return a success response
+		// In a real implementation, we'd wait for the service response
+		response := map[string]interface{}{
+			"code":    0,
+			"message": "Service invoked successfully",
+		}
+		
+		return json.Marshal(response)
+	})
+	
+	// Register a handler to get device status
+	p.rrpcClient.RegisterHandler("GetDeviceStatus", func(requestId string, payload []byte) ([]byte, error) {
+		// Collect all current property values
+		status := map[string]interface{}{
+			"status":    "online",
+			"timestamp": time.Now().Unix(),
+		}
+		
+		return json.Marshal(status)
+	})
 }

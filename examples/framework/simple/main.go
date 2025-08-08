@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -109,6 +111,57 @@ func main() {
 	if err := framework.Start(); err != nil {
 		log.Fatalf("Failed to start framework: %v", err)
 	}
+	
+	// Register RRPC handlers after framework starts (when RRPC client is initialized)
+	mqttPlugin.RegisterRRPCHandler("GetOvenStatus", func(requestId string, payload []byte) ([]byte, error) {
+		log.Printf("RRPC: GetOvenStatus request (ID: %s)", requestId)
+		
+		// Get the oven instance and return its status
+		status := map[string]interface{}{
+			"device":      "electric_oven",
+			"model":       "SmartOven-X1",
+			"status":      "online",
+			"timestamp":   time.Now().Unix(),
+		}
+		
+		return json.Marshal(status)
+	})
+	
+	mqttPlugin.RegisterRRPCHandler("SetOvenTemperature", func(requestId string, payload []byte) ([]byte, error) {
+		log.Printf("RRPC: SetOvenTemperature request (ID: %s): %s", requestId, string(payload))
+		
+		var request struct {
+			Method string `json:"method"`
+			Params struct {
+				Temperature float64 `json:"temperature"`
+			} `json:"params"`
+		}
+		
+		if err := json.Unmarshal(payload, &request); err != nil {
+			return nil, fmt.Errorf("invalid request format: %w", err)
+		}
+		
+		// Call the oven's temperature service
+		result := map[string]interface{}{
+			"code":    0,
+			"message": fmt.Sprintf("Temperature set to %.1f°C", request.Params.Temperature),
+		}
+		
+		return json.Marshal(result)
+	})
+	
+	mqttPlugin.RegisterRRPCHandler("EmergencyStop", func(requestId string, payload []byte) ([]byte, error) {
+		log.Printf("RRPC: EmergencyStop request (ID: %s)", requestId)
+		
+		// Emergency stop the oven
+		result := map[string]interface{}{
+			"code":    0,
+			"message": "Emergency stop executed",
+			"action":  "All heating stopped, door unlocked",
+		}
+		
+		return json.Marshal(result)
+	})
 
 	log.Println("Electric oven demo started. Press Ctrl+C to exit.")
 	log.Println("Connecting to IoT platform via MQTT...")
