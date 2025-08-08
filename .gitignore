@@ -66,3 +66,4 @@ examples/framework/simple/oven
 # 示例日志与通用日志文件
 examples/framework/simple/oven_log.txt
 *_log.txt
+examples/ota/*.bin
