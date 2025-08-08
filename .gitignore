@@ -59,3 +59,10 @@ build/
 # 调试文件
 debug
 __debug_bin*
+# 本地示例构建产物（二进制）
+examples/framework/simple/electric_oven_demo
+examples/framework/simple/oven
+
+# 示例日志与通用日志文件
+examples/framework/simple/oven_log.txt
+*_log.txt

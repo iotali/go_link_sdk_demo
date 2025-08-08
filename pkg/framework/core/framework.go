@@ -21,29 +21,31 @@ type Framework interface {
 	Start() error
 	Stop() error
 	WaitForShutdown()
-	
+
 	// Device management
 	RegisterDevice(device Device) error
 	UnregisterDevice(deviceID string) error
 	GetDevice(deviceID string) (Device, error)
-	
+
 	// Plugin management
 	LoadPlugin(plugin plugin.Plugin) error
 	UnloadPlugin(name string) error
 	GetPlugin(name string) (plugin.Plugin, error)
-	
+
 	// Event management
 	On(eventType event.EventType, handler event.Handler) error
 	Emit(event *event.Event) error
-	
+
 	// Property management
 	RegisterProperty(name string, getter func() interface{}, setter func(interface{}) error) error
 	ReportProperty(name string, value interface{}) error
 	ReportProperties(properties map[string]interface{}) error
-	
+	// Event management
+	ReportEvent(eventName string, data map[string]interface{}) error
+
 	// Service management
 	RegisterService(name string, handler func(params map[string]interface{}) (interface{}, error)) error
-	
+
 	// Status
 	GetState() LifecycleState
 	GetConnectionState() ConnectionState
@@ -53,30 +55,30 @@ type Framework interface {
 type IoTFramework struct {
 	// Configuration
 	config Config
-	
+
 	// Core components
 	eventBus     *event.Bus
 	pluginMgr    *plugin.Manager
 	devices      map[string]Device
 	devicesMutex sync.RWMutex
-	
+
 	// Properties and services
 	properties      map[string]*propertyHandler
 	services        map[string]serviceHandler
 	propertiesMutex sync.RWMutex
 	servicesMutex   sync.RWMutex
-	
+
 	// State management
 	state           LifecycleState
 	connectionState ConnectionState
 	stateMutex      sync.RWMutex
-	
+
 	// Lifecycle
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	shutdownCh chan os.Signal
-	
+
 	// Logging
 	logger *log.Logger
 }
@@ -112,15 +114,15 @@ func (f *IoTFramework) Initialize(config Config) error {
 	}
 	f.state = LifecycleInitializing
 	f.stateMutex.Unlock()
-	
+
 	f.logger.Println("Initializing framework...")
-	
+
 	// Update configuration
 	f.config = config
-	
+
 	// Create context
 	f.ctx, f.cancel = context.WithCancel(context.Background())
-	
+
 	// Initialize event bus
 	workerCount := config.Advanced.WorkerCount
 	if workerCount == 0 {
@@ -128,21 +130,21 @@ func (f *IoTFramework) Initialize(config Config) error {
 	}
 	f.eventBus = event.NewBus(workerCount)
 	f.eventBus.SetLogger(log.New(os.Stdout, "[EventBus] ", log.LstdFlags))
-	
+
 	// Initialize plugin manager
 	f.pluginMgr = plugin.NewManager()
 	f.pluginMgr.SetLogger(log.New(os.Stdout, "[PluginMgr] ", log.LstdFlags))
-	
+
 	// Register internal event handlers
 	f.registerInternalHandlers()
-	
+
 	// Setup signal handling
 	signal.Notify(f.shutdownCh, syscall.SIGINT, syscall.SIGTERM)
-	
+
 	f.stateMutex.Lock()
 	f.state = LifecycleInitialized
 	f.stateMutex.Unlock()
-	
+
 	f.logger.Println("Framework initialized successfully")
 	return nil
 }
@@ -156,24 +158,24 @@ func (f *IoTFramework) Start() error {
 	}
 	f.state = LifecycleStarting
 	f.stateMutex.Unlock()
-	
+
 	f.logger.Println("Starting framework...")
-	
+
 	// Start event bus
 	if err := f.eventBus.Start(); err != nil {
 		return fmt.Errorf("failed to start event bus: %w", err)
 	}
-	
+
 	// Initialize all loaded plugins first
 	if err := f.pluginMgr.InitAll(f.ctx, f); err != nil {
 		return fmt.Errorf("failed to initialize plugins: %w", err)
 	}
-	
+
 	// Start all loaded plugins
 	if err := f.pluginMgr.StartAll(); err != nil {
 		return fmt.Errorf("failed to start plugins: %w", err)
 	}
-	
+
 	// Initialize all devices
 	f.devicesMutex.RLock()
 	devices := make([]Device, 0, len(f.devices))
@@ -181,20 +183,20 @@ func (f *IoTFramework) Start() error {
 		devices = append(devices, device)
 	}
 	f.devicesMutex.RUnlock()
-	
+
 	for _, device := range devices {
 		if err := device.OnInitialize(f.ctx); err != nil {
 			f.logger.Printf("Failed to initialize device %v: %v", device.GetDeviceInfo().DeviceName, err)
 		}
 	}
-	
+
 	// Emit system ready event
 	f.Emit(event.NewEvent(event.EventReady, "framework", nil))
-	
+
 	f.stateMutex.Lock()
 	f.state = LifecycleStarted
 	f.stateMutex.Unlock()
-	
+
 	f.logger.Println("Framework started successfully")
 	return nil
 }
@@ -208,9 +210,9 @@ func (f *IoTFramework) Stop() error {
 	}
 	f.state = LifecycleStopping
 	f.stateMutex.Unlock()
-	
+
 	f.logger.Println("Stopping framework...")
-	
+
 	// Destroy all devices
 	f.devicesMutex.RLock()
 	devices := make([]Device, 0, len(f.devices))
@@ -218,33 +220,33 @@ func (f *IoTFramework) Stop() error {
 		devices = append(devices, device)
 	}
 	f.devicesMutex.RUnlock()
-	
+
 	for _, device := range devices {
 		if err := device.OnDestroy(f.ctx); err != nil {
 			f.logger.Printf("Failed to destroy device %v: %v", device.GetDeviceInfo().DeviceName, err)
 		}
 	}
-	
+
 	// Stop all plugins
 	if err := f.pluginMgr.StopAll(); err != nil {
 		f.logger.Printf("Error stopping plugins: %v", err)
 	}
-	
+
 	// Stop event bus
 	if err := f.eventBus.Stop(); err != nil {
 		f.logger.Printf("Error stopping event bus: %v", err)
 	}
-	
+
 	// Cancel context
 	f.cancel()
-	
+
 	// Wait for goroutines to finish
 	f.wg.Wait()
-	
+
 	f.stateMutex.Lock()
 	f.state = LifecycleStopped
 	f.stateMutex.Unlock()
-	
+
 	f.logger.Println("Framework stopped")
 	return nil
 }
@@ -261,20 +263,20 @@ func (f *IoTFramework) RegisterDevice(device Device) error {
 	if device == nil {
 		return fmt.Errorf("device cannot be nil")
 	}
-	
+
 	info := device.GetDeviceInfo()
 	deviceID := fmt.Sprintf("%s.%s", info.ProductKey, info.DeviceName)
-	
+
 	f.devicesMutex.Lock()
 	defer f.devicesMutex.Unlock()
-	
+
 	if _, exists := f.devices[deviceID]; exists {
 		return fmt.Errorf("device %s already registered", deviceID)
 	}
-	
+
 	f.devices[deviceID] = device
 	f.logger.Printf("Registered device: %s", deviceID)
-	
+
 	// If framework is already running, initialize the device
 	if f.GetState() == LifecycleStarted {
 		go func() {
@@ -283,7 +285,7 @@ func (f *IoTFramework) RegisterDevice(device Device) error {
 			}
 		}()
 	}
-	
+
 	return nil
 }
 
@@ -291,20 +293,20 @@ func (f *IoTFramework) RegisterDevice(device Device) error {
 func (f *IoTFramework) UnregisterDevice(deviceID string) error {
 	f.devicesMutex.Lock()
 	defer f.devicesMutex.Unlock()
-	
+
 	device, exists := f.devices[deviceID]
 	if !exists {
 		return fmt.Errorf("device %s not found", deviceID)
 	}
-	
+
 	// Call destroy callback
 	if err := device.OnDestroy(f.ctx); err != nil {
 		f.logger.Printf("Error destroying device %s: %v", deviceID, err)
 	}
-	
+
 	delete(f.devices, deviceID)
 	f.logger.Printf("Unregistered device: %s", deviceID)
-	
+
 	return nil
 }
 
@@ -312,12 +314,12 @@ func (f *IoTFramework) UnregisterDevice(deviceID string) error {
 func (f *IoTFramework) GetDevice(deviceID string) (Device, error) {
 	f.devicesMutex.RLock()
 	defer f.devicesMutex.RUnlock()
-	
+
 	device, exists := f.devices[deviceID]
 	if !exists {
 		return nil, fmt.Errorf("device %s not found", deviceID)
 	}
-	
+
 	return device, nil
 }
 
@@ -350,18 +352,18 @@ func (f *IoTFramework) Emit(evt *event.Event) error {
 func (f *IoTFramework) RegisterProperty(name string, getter func() interface{}, setter func(interface{}) error) error {
 	f.propertiesMutex.Lock()
 	defer f.propertiesMutex.Unlock()
-	
+
 	mode := "r"
 	if setter != nil {
 		mode = "rw"
 	}
-	
+
 	f.properties[name] = &propertyHandler{
 		getter: getter,
 		setter: setter,
 		mode:   mode,
 	}
-	
+
 	f.logger.Printf("Registered property: %s (mode: %s)", name, mode)
 	return nil
 }
@@ -378,11 +380,22 @@ func (f *IoTFramework) ReportProperties(properties map[string]interface{}) error
 	return f.eventBus.Publish(evt)
 }
 
+// ReportEvent reports a device business event to the cloud
+func (f *IoTFramework) ReportEvent(eventName string, data map[string]interface{}) error {
+	payload := map[string]interface{}{
+		"event_type": eventName,
+		"data":       data,
+		"timestamp":  time.Now().Unix(),
+	}
+	evt := event.NewEvent(event.EventEventReport, "framework", payload)
+	return f.eventBus.Publish(evt)
+}
+
 // RegisterService registers a service handler
 func (f *IoTFramework) RegisterService(name string, handler func(params map[string]interface{}) (interface{}, error)) error {
 	f.servicesMutex.Lock()
 	defer f.servicesMutex.Unlock()
-	
+
 	f.services[name] = handler
 	f.logger.Printf("Registered service: %s", name)
 	return nil
@@ -409,7 +422,7 @@ func (f *IoTFramework) registerInternalHandlers() {
 		f.stateMutex.Lock()
 		f.connectionState = StateConnected
 		f.stateMutex.Unlock()
-		
+
 		// Notify all devices
 		f.devicesMutex.RLock()
 		devices := make([]Device, 0, len(f.devices))
@@ -417,19 +430,19 @@ func (f *IoTFramework) registerInternalHandlers() {
 			devices = append(devices, device)
 		}
 		f.devicesMutex.RUnlock()
-		
+
 		for _, device := range devices {
 			go device.OnConnect(f.ctx)
 		}
-		
+
 		return nil
 	})
-	
+
 	f.eventBus.Subscribe(event.EventDisconnected, func(evt *event.Event) error {
 		f.stateMutex.Lock()
 		f.connectionState = StateDisconnected
 		f.stateMutex.Unlock()
-		
+
 		// Notify all devices
 		f.devicesMutex.RLock()
 		devices := make([]Device, 0, len(f.devices))
@@ -437,33 +450,33 @@ func (f *IoTFramework) registerInternalHandlers() {
 			devices = append(devices, device)
 		}
 		f.devicesMutex.RUnlock()
-		
+
 		for _, device := range devices {
 			go device.OnDisconnect(f.ctx)
 		}
-		
+
 		return nil
 	})
-	
+
 	// Handle property set events
 	f.eventBus.Subscribe(event.EventPropertySet, func(evt *event.Event) error {
 		props, ok := evt.Data.(map[string]interface{})
 		if !ok {
 			return fmt.Errorf("invalid property data")
 		}
-		
+
 		// Process each property
 		for name, value := range props {
 			f.propertiesMutex.RLock()
 			handler, exists := f.properties[name]
 			f.propertiesMutex.RUnlock()
-			
+
 			if exists && handler.setter != nil {
 				if err := handler.setter(value); err != nil {
 					f.logger.Printf("Error setting property %s: %v", name, err)
 				}
 			}
-			
+
 			// Notify devices
 			f.devicesMutex.RLock()
 			devices := make([]Device, 0, len(f.devices))
@@ -471,7 +484,7 @@ func (f *IoTFramework) registerInternalHandlers() {
 				devices = append(devices, device)
 			}
 			f.devicesMutex.RUnlock()
-			
+
 			for _, device := range devices {
 				device.OnPropertySet(Property{
 					Name:  name,
@@ -479,21 +492,21 @@ func (f *IoTFramework) registerInternalHandlers() {
 				})
 			}
 		}
-		
+
 		return nil
 	})
-	
+
 	// Handle service call events
 	f.eventBus.Subscribe(event.EventServiceCall, func(evt *event.Event) error {
 		req, ok := evt.Data.(ServiceRequest)
 		if !ok {
 			return fmt.Errorf("invalid service request")
 		}
-		
+
 		f.servicesMutex.RLock()
 		handler, exists := f.services[req.Service]
 		f.servicesMutex.RUnlock()
-		
+
 		if !exists {
 			// Try devices
 			f.devicesMutex.RLock()
@@ -502,7 +515,7 @@ func (f *IoTFramework) registerInternalHandlers() {
 				devices = append(devices, device)
 			}
 			f.devicesMutex.RUnlock()
-			
+
 			for _, device := range devices {
 				resp, err := device.OnServiceInvoke(req)
 				if err == nil {
@@ -511,18 +524,18 @@ func (f *IoTFramework) registerInternalHandlers() {
 					return nil
 				}
 			}
-			
+
 			return fmt.Errorf("service %s not found", req.Service)
 		}
-		
+
 		// Execute service handler
 		result, err := handler(req.Params)
-		
+
 		resp := ServiceResponse{
 			ID:        req.ID,
 			Timestamp: time.Now(),
 		}
-		
+
 		if err != nil {
 			resp.Code = -1
 			resp.Message = err.Error()
@@ -530,10 +543,10 @@ func (f *IoTFramework) registerInternalHandlers() {
 			resp.Code = 0
 			resp.Data = result
 		}
-		
+
 		// Emit response event
 		f.Emit(event.NewEvent(event.EventServiceResponse, "framework", resp))
-		
+
 		return nil
 	})
 }

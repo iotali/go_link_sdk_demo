@@ -24,6 +24,12 @@ const (
 	EventPropertyReport EventType = "property.report"
 )
 
+// Business events
+const (
+	// EventEventReport is emitted when a device business event should be reported to cloud
+	EventEventReport EventType = "event.report"
+)
+
 // Service events
 const (
 	EventServiceCall     EventType = "service.call"
