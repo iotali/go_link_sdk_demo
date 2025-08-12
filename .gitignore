@@ -67,3 +67,4 @@ examples/framework/simple/oven
 examples/framework/simple/oven_log.txt
 *_log.txt
 examples/ota/*.bin
+examples/framework/simple/electric_oven
