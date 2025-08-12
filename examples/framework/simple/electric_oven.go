@@ -78,7 +78,7 @@ func (o *ElectricOven) OnInitialize(ctx context.Context) error {
 	o.framework.RegisterProperty("current_temperature", o.getCurrentTemp, nil)
 	o.framework.RegisterProperty("target_temperature", o.getTargetTemp, o.setTargetTemp)
 	o.framework.RegisterProperty("heater_status", o.getHeaterStatus, nil)
-	o.framework.RegisterProperty("timer_setting", o.getTimerSetting, nil)
+	o.framework.RegisterProperty("timer_setting", o.getTimerSetting, o.setTimerSetting)
 	o.framework.RegisterProperty("remaining_time", o.getRemainingTime, nil)
 	o.framework.RegisterProperty("door_status", o.getDoorStatus, nil)
 	o.framework.RegisterProperty("power_consumption", o.getPowerConsumption, nil)
@@ -136,6 +136,8 @@ func (o *ElectricOven) OnPropertySet(property core.Property) error {
 		if val, ok := property.Value.(bool); ok {
 			return o.setInternalLight(val)
 		}
+	case "timer_setting":
+		return o.setTimerSetting(property.Value)
 	}
 
 	return fmt.Errorf("property %s cannot be set or invalid value", property.Name)
@@ -264,6 +266,72 @@ func (o *ElectricOven) setInternalLight(value interface{}) error {
 	o.mutex.Unlock()
 
 	log.Printf("[%s] Internal light set to %v", o.DeviceInfo.DeviceName, light)
+	o.reportFullStatus()
+
+	return nil
+}
+
+func (o *ElectricOven) setTimerSetting(value interface{}) error {
+	var minutes int32
+
+	// Handle different number types
+	switch v := value.(type) {
+	case float64:
+		minutes = int32(v)
+	case int32:
+		minutes = v
+	case int:
+		minutes = int32(v)
+	default:
+		return fmt.Errorf("invalid timer value type")
+	}
+
+	if minutes < 0 || minutes > 1440 {
+		return fmt.Errorf("timer out of range (0-1440 minutes)")
+	}
+
+	o.mutex.Lock()
+	// Check if door is open
+	if o.doorStatus {
+		o.mutex.Unlock()
+		return fmt.Errorf("cannot set timer when door is open")
+	}
+
+	// If no target temperature is set and timer > 0, set a default one
+	if minutes > 0 && o.targetTemp == 0 {
+		o.targetTemp = 180.0 // Default temperature
+		o.isRunning = true
+		log.Printf("[%s] Auto-setting target temperature to 180°C for timer", o.DeviceInfo.DeviceName)
+	}
+
+	o.timerSetting = minutes
+	o.remainingTime = minutes
+
+	if minutes > 0 {
+		o.operationMode = "定时加热中"
+		// Switch to fast reporting when timer starts
+		o.mutex.Unlock()
+		select {
+		case o.fastReportCh <- true:
+		default:
+		}
+		// Trigger timer processing
+		select {
+		case o.timerCh <- struct{}{}:
+		default:
+		}
+	} else {
+		// Timer cancelled
+		o.operationMode = "待机"
+		o.mutex.Unlock()
+		// Switch back to normal reporting
+		select {
+		case o.fastReportCh <- false:
+		default:
+		}
+	}
+
+	log.Printf("[%s] Timer setting set to %d minutes", o.DeviceInfo.DeviceName, minutes)
 	o.reportFullStatus()
 
 	return nil
