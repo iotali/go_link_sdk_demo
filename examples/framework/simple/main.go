@@ -163,6 +163,27 @@ func main() {
 		return json.Marshal(result)
 	})
 
+	// Create and start OTA manager using the plugin's MQTT client
+	// Get the MQTT client from the plugin to avoid ClientID conflicts
+	mqttClient := mqttPlugin.GetMQTTClient()
+	if mqttClient != nil {
+		otaManager := NewOTAManager(
+			mqttClient,
+			frameworkConfig.Device.ProductKey,
+			frameworkConfig.Device.DeviceName,
+			oven,
+		)
+		
+		if err := otaManager.Start(); err != nil {
+			log.Printf("[OTA] Failed to start OTA manager: %v", err)
+		} else {
+			log.Println("[OTA] OTA manager started successfully")
+			defer otaManager.Stop()
+		}
+	} else {
+		log.Printf("[OTA] Warning: MQTT client not available, OTA functionality disabled")
+	}
+
 	log.Println("Electric oven demo started. Press Ctrl+C to exit.")
 	log.Println("Connecting to IoT platform via MQTT...")
 

@@ -386,8 +386,9 @@ func (c *Client) Download(ctx context.Context, task *TaskDesc, rangeStart, range
 	}
 
 	// Send request
+	// Use longer timeout for large file downloads
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: 10 * time.Minute, // Increased timeout for large files
 	}
 
 	resp, err := client.Do(req)
@@ -398,6 +399,14 @@ func (c *Client) Download(ctx context.Context, task *TaskDesc, rangeStart, range
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	
+	// Log response headers for debugging
+	if c.logger != nil {
+		c.logger.Printf("HTTP Status: %s, Content-Length: %d", resp.Status, resp.ContentLength)
+		if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+			c.logger.Printf("Content-Type: %s", contentType)
+		}
 	}
 
 	// For partial downloads, we don't verify digest
@@ -415,59 +424,140 @@ func (c *Client) Download(ctx context.Context, task *TaskDesc, rangeStart, range
 	}
 
 	// Download with progress reporting
-	var downloaded uint32
-	totalSize := task.Size
+	totalSize := uint64(task.Size)
 	if rangeEnd > 0 && rangeStart <= rangeEnd {
-		totalSize = rangeEnd - rangeStart + 1
+		totalSize = uint64(rangeEnd - rangeStart + 1)
+	}
+	
+	// Get actual content length from response header
+	if contentLength := resp.ContentLength; contentLength > 0 {
+		totalSize = uint64(contentLength)
+		if c.logger != nil {
+			c.logger.Printf("Actual download size: %d bytes (task.Size was %d)", totalSize, task.Size)
+		}
 	}
 
-	buffer := make([]byte, 2048)
-	lastPercent := -1
-
+	// Use io.Copy with a custom writer to track progress
+	type progressWriter struct {
+		totalSize  uint64
+		downloaded uint64
+		lastPercent int
+		hasher     hash.Hash
+		client     *Client
+	}
+	
+	pw := &progressWriter{
+		totalSize:   totalSize,
+		downloaded:  0,
+		lastPercent: -1,
+		hasher:      hasher,
+		client:      c,
+	}
+	
+	// Custom Write method for progress tracking
+	writeFunc := func(p []byte) (n int, err error) {
+		n = len(p)
+		if n > 0 {
+			// Update hash
+			if !isPartialDownload && pw.hasher != nil {
+				pw.hasher.Write(p)
+			}
+			
+			pw.downloaded += uint64(n)
+			
+			// Calculate and report progress
+			percent := int(pw.downloaded * 100 / pw.totalSize)
+			if percent > 100 {
+				percent = 100
+			}
+			
+			if percent != pw.lastPercent {
+				pw.lastPercent = percent
+				pw.client.notifyDownloadHandler(percent, p, nil)
+			}
+		}
+		return n, nil
+	}
+	
+	// Use io.Copy to ensure we read all data
+	buffer := make([]byte, 32*1024) // Use larger buffer for efficiency
+	var totalDownloaded int64
+	
 	for {
 		select {
 		case <-c.downloadCtx.Done():
 			return fmt.Errorf("download cancelled")
 		default:
 			n, err := resp.Body.Read(buffer)
-			if err != nil && err != io.EOF {
-				c.notifyDownloadHandler(-1, nil, err)
-				return fmt.Errorf("failed to read response: %w", err)
-			}
-
 			if n > 0 {
-				data := buffer[:n]
-				// Only calculate hash for full downloads
-				if !isPartialDownload && hasher != nil {
-					hasher.Write(data)
+				_, writeErr := writeFunc(buffer[:n])
+				if writeErr != nil {
+					return fmt.Errorf("failed to process data: %w", writeErr)
 				}
-				downloaded += uint32(n)
-
-				// Calculate progress based on partial download size
-				percent := int(downloaded * 100 / totalSize)
-				if percent != lastPercent {
-					lastPercent = percent
-					c.notifyDownloadHandler(percent, data, nil)
-				}
+				totalDownloaded += int64(n)
 			}
-
-			if err == io.EOF {
-				// Only verify digest for full downloads
-				if !isPartialDownload && hasher != nil {
-					digest := fmt.Sprintf("%x", hasher.Sum(nil))
-					if digest != task.ExpectDigest {
-						err := fmt.Errorf("digest mismatch: expected %s, got %s", task.ExpectDigest, digest)
-						c.notifyDownloadHandler(-3, nil, err)
-						return err
+			
+			if err != nil {
+				if err == io.EOF {
+					// EOF reached, check if download is complete
+					if pw.downloaded < totalSize {
+						// Try to continue reading in case it's a false EOF
+						if c.logger != nil {
+							c.logger.Printf("Received EOF at %d bytes, expected %d bytes. Attempting to continue...", pw.downloaded, totalSize)
+						}
+						// Give it a small delay and retry
+						time.Sleep(100 * time.Millisecond)
+						
+						// Try one more read
+						n2, err2 := resp.Body.Read(buffer)
+						if n2 > 0 {
+							_, writeErr := writeFunc(buffer[:n2])
+							if writeErr != nil {
+								return fmt.Errorf("failed to process data: %w", writeErr)
+							}
+							totalDownloaded += int64(n2)
+							continue // Continue reading
+						}
+						
+						if err2 == io.EOF && pw.downloaded < totalSize {
+							// Really incomplete
+							err := fmt.Errorf("download incomplete: got %d bytes, expected %d bytes", pw.downloaded, totalSize)
+							if c.logger != nil {
+								c.logger.Printf("Download incomplete: %d/%d bytes (%.1f%%)", pw.downloaded, totalSize, float64(pw.downloaded)*100/float64(totalSize))
+							}
+							c.notifyDownloadHandler(-2, nil, err)
+							return err
+						}
 					}
+					
+					// Download complete
+					break
+				} else {
+					// Other errors
+					c.notifyDownloadHandler(-1, nil, err)
+					return fmt.Errorf("failed to read response: %w", err)
 				}
-
-				// Download completed
-				c.notifyDownloadHandler(100, nil, nil)
-				return nil
 			}
 		}
+		
+		if err == io.EOF {
+			break
+		}
 	}
+	
+	// Verify digest
+	if !isPartialDownload && hasher != nil {
+		digest := fmt.Sprintf("%x", hasher.Sum(nil))
+		if digest != task.ExpectDigest {
+			err := fmt.Errorf("digest mismatch: expected %s, got %s", task.ExpectDigest, digest)
+			c.notifyDownloadHandler(-3, nil, err)
+			return err
+		}
+	}
+	
+	// Download completed successfully
+	c.notifyDownloadHandler(100, nil, nil)
+	return nil
 }
 
 // notifyDownloadHandler calls the download handler if set

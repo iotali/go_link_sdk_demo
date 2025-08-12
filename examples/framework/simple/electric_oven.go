@@ -26,6 +26,12 @@ type ElectricOven struct {
 	operationMode    string  // 操作模式
 	internalLight    bool    // 内部照明
 	fanStatus        bool    // 风扇状态
+	
+	// OTA Properties
+	firmwareVersion  string  // 固件版本
+	otaStatus        string  // OTA状态: idle, downloading, updating, failed
+	otaProgress      int32   // OTA进度 (0-100)
+	lastUpdateTime   string  // 上次更新时间
 
 	// Internal state
 	isRunning    bool
@@ -64,6 +70,10 @@ func NewElectricOven(productKey, deviceName, deviceSecret string) *ElectricOven 
 		operationMode:    "待机",
 		internalLight:    false,
 		fanStatus:        false,
+		firmwareVersion:  "1.0.0", // Initial version
+		otaStatus:        "idle",
+		otaProgress:      0,
+		lastUpdateTime:   "",
 		stopCh:           make(chan struct{}),
 		timerCh:          make(chan struct{}, 1),
 		fastReportCh:     make(chan bool, 1),
@@ -85,6 +95,12 @@ func (o *ElectricOven) OnInitialize(ctx context.Context) error {
 	o.framework.RegisterProperty("operation_mode", o.getOperationMode, nil)
 	o.framework.RegisterProperty("internal_light", o.getInternalLight, o.setInternalLight)
 	o.framework.RegisterProperty("fan_status", o.getFanStatus, nil)
+	
+	// Register OTA properties
+	o.framework.RegisterProperty("firmware_version", o.getFirmwareVersion, nil)
+	o.framework.RegisterProperty("ota_status", o.getOTAStatus, nil)
+	o.framework.RegisterProperty("ota_progress", o.getOTAProgress, nil)
+	o.framework.RegisterProperty("last_update_time", o.getLastUpdateTime, nil)
 
 	// Register services
 	o.framework.RegisterService("set_temperature", o.setTemperatureService)
@@ -702,6 +718,13 @@ func (o *ElectricOven) reportFullStatus() {
 		"operation_mode":      o.operationMode,
 		"internal_light":      o.internalLight,
 		"fan_status":          o.fanStatus,
+		"firmware_version":    o.firmwareVersion,
+		"ota_status":          o.otaStatus,
+		"ota_progress":        o.otaProgress,
+	}
+	// Only include last_update_time if it's not empty
+	if o.lastUpdateTime != "" {
+		status["last_update_time"] = o.lastUpdateTime
 	}
 	o.mutex.RUnlock()
 
@@ -759,4 +782,69 @@ func (o *ElectricOven) reportTimerCancelled() {
 // SetFramework sets the framework reference
 func (o *ElectricOven) SetFramework(framework core.Framework) {
 	o.framework = framework
+}
+
+// OTA Property Getters
+
+// getFirmwareVersion returns the current firmware version
+func (o *ElectricOven) getFirmwareVersion() interface{} {
+	o.mutex.RLock()
+	defer o.mutex.RUnlock()
+	return o.firmwareVersion
+}
+
+// getOTAStatus returns the current OTA status
+func (o *ElectricOven) getOTAStatus() interface{} {
+	o.mutex.RLock()
+	defer o.mutex.RUnlock()
+	return o.otaStatus
+}
+
+// getOTAProgress returns the current OTA progress
+func (o *ElectricOven) getOTAProgress() interface{} {
+	o.mutex.RLock()
+	defer o.mutex.RUnlock()
+	return o.otaProgress
+}
+
+// getLastUpdateTime returns the last update time
+func (o *ElectricOven) getLastUpdateTime() interface{} {
+	o.mutex.RLock()
+	defer o.mutex.RUnlock()
+	return o.lastUpdateTime
+}
+
+// UpdateOTAStatus updates the OTA status and progress
+func (o *ElectricOven) UpdateOTAStatus(status string, progress int32) {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
+	
+	o.otaStatus = status
+	o.otaProgress = progress
+	
+	if status == "updating" {
+		o.lastUpdateTime = time.Now().Format(time.RFC3339)
+	}
+	
+	// Trigger fast reporting when OTA is active, stop when idle or failed
+	if status == "downloading" || status == "verifying" || status == "updating" {
+		// Trigger fast reporting
+		select {
+		case o.fastReportCh <- true:
+		default:
+		}
+	} else if status == "idle" || status == "failed" {
+		// Stop fast reporting
+		select {
+		case o.fastReportCh <- false:
+		default:
+		}
+	}
+}
+
+// SetFirmwareVersion sets the firmware version
+func (o *ElectricOven) SetFirmwareVersion(version string) {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
+	o.firmwareVersion = version
 }

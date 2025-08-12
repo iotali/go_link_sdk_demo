@@ -55,6 +55,7 @@ Thumbs.db
 # 构建输出目录
 dist/
 build/
+oven
 
 # 调试文件
 debug
@@ -68,3 +69,5 @@ examples/framework/simple/oven_log.txt
 *_log.txt
 examples/ota/*.bin
 examples/framework/simple/electric_oven
+examples/framework/simple/oven
+examples/framework/simple/oven.backup

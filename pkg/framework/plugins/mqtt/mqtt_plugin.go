@@ -450,6 +450,11 @@ func (p *MQTTPlugin) RegisterRRPCHandler(method string, handler func(requestId s
 	}
 }
 
+// GetMQTTClient returns the underlying MQTT client for use by other components like OTA
+func (p *MQTTPlugin) GetMQTTClient() *mqtt.Client {
+	return p.client
+}
+
 // registerRRPCHandlers registers framework-level RRPC handlers
 func (p *MQTTPlugin) registerRRPCHandlers() {
 	// Register a default handler that routes RRPC requests to framework services
