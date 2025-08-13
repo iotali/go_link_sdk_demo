@@ -13,8 +13,6 @@ import (
 	"github.com/iot-go-sdk/pkg/framework/plugins/ota"
 )
 
-// Note: Device implementation moved to electric_oven.go
-
 func main() {
 
 	// Create SDK configuration for MQTT plugin
@@ -83,17 +81,13 @@ func main() {
 		log.Fatalf("Failed to load OTA plugin: %v", err)
 	}
 
-	// Create and register electric oven device
+	// Create electric oven device (but don't register yet)
 	oven := NewElectricOven(
 		frameworkConfig.Device.ProductKey,
 		frameworkConfig.Device.DeviceName,
 		frameworkConfig.Device.DeviceSecret,
 	)
 	oven.SetFramework(framework)
-
-	if err := framework.RegisterDevice(oven); err != nil {
-		log.Fatalf("Failed to register device: %v", err)
-	}
 
 	// Register event handlers
 	framework.On(event.EventConnected, func(evt *event.Event) error {
@@ -117,9 +111,24 @@ func main() {
 	})
 
 	// Start framework
+	log.Println("About to call framework.Start()...")
 	if err := framework.Start(); err != nil {
 		log.Fatalf("Failed to start framework: %v", err)
 	}
+	log.Println("framework.Start() completed successfully!")
+
+	// Set the MQTT client directly to avoid framework plugin deadlock
+	log.Println("Setting MQTT client for OTA plugin...")
+	if err := otaPlugin.SetMQTTClient(mqttPlugin.GetMQTTClient()); err != nil {
+		log.Printf("Warning: Failed to set MQTT client for OTA plugin: %v", err)
+	}
+
+	// Now register the device AFTER framework and plugins are started
+	log.Println("Registering oven device...")
+	if err := framework.RegisterDevice(oven); err != nil {
+		log.Fatalf("Failed to register device: %v", err)
+	}
+	log.Println("Oven device registered successfully!")
 	
 	// Register RRPC handlers after framework starts (when RRPC client is initialized)
 	mqttPlugin.RegisterRRPCHandler("GetOvenStatus", func(requestId string, payload []byte) ([]byte, error) {
@@ -174,11 +183,6 @@ func main() {
 
 	// OTA is now handled by the framework OTA plugin
 	// The plugin automatically manages OTA for all registered devices
-	// It will read version.txt which contains:
-	// {
-	//   "version": "1.0.12",
-	//   "module": "x86"
-	// }
 	log.Println("[OTA] Using framework OTA plugin with x86 module")
 
 	log.Println("Electric oven demo started. Press Ctrl+C to exit.")

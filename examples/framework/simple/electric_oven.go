@@ -2,14 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/iot-go-sdk/pkg/framework/core"
 )
+
+// DeviceVersionInfo stores device version and module information
+type DeviceVersionInfo struct {
+	Version string `json:"version"`
+	Module  string `json:"module"`
+}
 
 // ElectricOven represents a smart electric oven with temperature control
 type ElectricOven struct {
@@ -86,7 +96,11 @@ func NewElectricOven(productKey, deviceName, deviceSecret string) *ElectricOven 
 func (o *ElectricOven) OnInitialize(ctx context.Context) error {
 	log.Printf("[%s] Initializing electric oven...", o.DeviceInfo.DeviceName)
 
+	// Load version information from version.txt file first
+	o.updateVersionFromFile()
+
 	// Register properties (read-only)
+	log.Printf("[%s] Registering properties...", o.DeviceInfo.DeviceName)
 	o.framework.RegisterProperty("current_temperature", o.getCurrentTemp, nil)
 	o.framework.RegisterProperty("target_temperature", o.getTargetTemp, o.setTargetTemp)
 	o.framework.RegisterProperty("heater_status", o.getHeaterStatus, nil)
@@ -99,6 +113,7 @@ func (o *ElectricOven) OnInitialize(ctx context.Context) error {
 	o.framework.RegisterProperty("fan_status", o.getFanStatus, nil)
 	
 	// Register OTA properties
+	log.Printf("[%s] Registering OTA properties...", o.DeviceInfo.DeviceName)
 	o.framework.RegisterProperty("firmware_version", o.getFirmwareVersion, o.setFirmwareVersion)
 	o.framework.RegisterProperty("firmware_module", o.getFirmwareModule, o.setFirmwareModule)
 	o.framework.RegisterProperty("ota_status", o.getOTAStatus, nil)
@@ -106,13 +121,16 @@ func (o *ElectricOven) OnInitialize(ctx context.Context) error {
 	o.framework.RegisterProperty("last_update_time", o.getLastUpdateTime, nil)
 
 	// Register services
+	log.Printf("[%s] Registering services...", o.DeviceInfo.DeviceName)
 	o.framework.RegisterService("set_temperature", o.setTemperatureService)
 	o.framework.RegisterService("start_timer", o.startTimerService)
 	o.framework.RegisterService("toggle_door", o.toggleDoorService)
 
 	// Start simulation
+	log.Printf("[%s] Starting simulation...", o.DeviceInfo.DeviceName)
 	o.startSimulation()
 
+	log.Printf("[%s] Electric oven initialized successfully", o.DeviceInfo.DeviceName)
 	return nil
 }
 
@@ -136,9 +154,15 @@ func (o *ElectricOven) OnDisconnect(ctx context.Context) error {
 func (o *ElectricOven) OnDestroy(ctx context.Context) error {
 	log.Printf("[%s] Destroying electric oven...", o.DeviceInfo.DeviceName)
 
-	// Stop simulation
-	close(o.stopCh)
+	// Stop simulation gracefully
+	select {
+	case <-o.stopCh:
+		// Already closed
+	default:
+		close(o.stopCh)
+	}
 
+	log.Printf("[%s] Electric oven destroyed successfully", o.DeviceInfo.DeviceName)
 	return nil
 }
 
@@ -173,6 +197,47 @@ func (o *ElectricOven) OnServiceInvoke(service core.ServiceRequest) (core.Servic
 		Message:   "Service handled by framework",
 		Timestamp: time.Now(),
 	}, nil
+}
+
+// OnPropertyGet handles property get requests from external components (like OTA plugin)
+func (o *ElectricOven) OnPropertyGet(name string) (interface{}, error) {
+	o.mutex.RLock()
+	defer o.mutex.RUnlock()
+	
+	switch name {
+	case "current_temperature":
+		return o.currentTemp, nil
+	case "target_temperature":
+		return o.targetTemp, nil
+	case "heater_status":
+		return o.heaterStatus, nil
+	case "timer_setting":
+		return o.timerSetting, nil
+	case "remaining_time":
+		return o.remainingTime, nil
+	case "door_status":
+		return o.doorStatus, nil
+	case "power_consumption":
+		return o.powerConsumption, nil
+	case "operation_mode":
+		return o.operationMode, nil
+	case "internal_light":
+		return o.internalLight, nil
+	case "fan_status":
+		return o.fanStatus, nil
+	case "firmware_version":
+		return o.firmwareVersion, nil
+	case "firmware_module":
+		return o.firmwareModule, nil
+	case "ota_status":
+		return o.otaStatus, nil
+	case "ota_progress":
+		return o.otaProgress, nil
+	case "last_update_time":
+		return o.lastUpdateTime, nil
+	default:
+		return nil, fmt.Errorf("property %s not found", name)
+	}
 }
 
 // Property getters
@@ -876,4 +941,81 @@ func (o *ElectricOven) SetFirmwareVersion(version string) {
 	o.mutex.Lock()
 	defer o.mutex.Unlock()
 	o.firmwareVersion = version
+}
+
+// loadVersionInfo loads version info from version.txt file
+func (o *ElectricOven) loadVersionInfo() *DeviceVersionInfo {
+	// Try multiple possible locations for version.txt
+	possiblePaths := []string{
+		"version.txt",                    // Current working directory (for go run)
+		"./version.txt",                  // Explicit current directory
+	}
+	
+	// Add executable directory path if available (for compiled binary)
+	if execPath, err := os.Executable(); err == nil {
+		execPath, _ = filepath.EvalSymlinks(execPath) // Resolve symlinks
+		dir := filepath.Dir(execPath)
+		possiblePaths = append(possiblePaths, filepath.Join(dir, "version.txt"))
+	}
+	
+	var versionFile string
+	var data []byte
+	var err error
+	
+	// Try each possible path
+	for _, path := range possiblePaths {
+		data, err = os.ReadFile(path)
+		if err == nil {
+			versionFile = path
+			break
+		}
+	}
+	
+	if err != nil {
+		log.Printf("[%s] Failed to find version.txt in any of these locations: %v", 
+			o.DeviceInfo.DeviceName, possiblePaths)
+		return nil
+	}
+	
+	// Try to parse as JSON first
+	var info DeviceVersionInfo
+	if err := json.Unmarshal(data, &info); err == nil {
+		// Set default module if empty
+		if info.Module == "" {
+			info.Module = "default"
+		}
+		log.Printf("[%s] Loaded version info from %s: version=%s, module=%s", 
+			o.DeviceInfo.DeviceName, versionFile, info.Version, info.Module)
+		return &info
+	}
+	
+	// Fallback to plain text (backward compatibility)
+	version := strings.TrimSpace(string(data))
+	if version != "" {
+		log.Printf("[%s] Loaded version from %s (plain text): version=%s, module=x86", 
+			o.DeviceInfo.DeviceName, versionFile, version)
+		return &DeviceVersionInfo{
+			Version: version,
+			Module:  "x86", // Default to x86 for backward compatibility
+		}
+	}
+	
+	return nil
+}
+
+// updateVersionFromFile loads and applies version info from version.txt
+func (o *ElectricOven) updateVersionFromFile() {
+	if info := o.loadVersionInfo(); info != nil {
+		o.mutex.Lock()
+		oldVersion := o.firmwareVersion
+		oldModule := o.firmwareModule
+		o.firmwareVersion = info.Version
+		o.firmwareModule = info.Module
+		o.mutex.Unlock()
+		
+		if oldVersion != info.Version || oldModule != info.Module {
+			log.Printf("[%s] Updated firmware info: %s (%s) -> %s (%s)", 
+				o.DeviceInfo.DeviceName, oldVersion, oldModule, info.Version, info.Module)
+		}
+	}
 }

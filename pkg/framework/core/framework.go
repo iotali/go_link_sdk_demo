@@ -253,11 +253,27 @@ func (f *IoTFramework) Stop() error {
 
 // WaitForShutdown waits for shutdown signal
 func (f *IoTFramework) WaitForShutdown() {
-	f.logger.Println("Waiting for shutdown signal...")
+	f.logger.Println("Waiting for shutdown signal... (Press Ctrl+C to exit)")
 	sig := <-f.shutdownCh
-	f.logger.Printf("Shutdown signal received: %v", sig)
-	if err := f.Stop(); err != nil {
-		f.logger.Printf("Error during stop: %v", err)
+	f.logger.Printf("Shutdown signal received: %v, initiating graceful shutdown...", sig)
+	
+	// Start shutdown in a separate goroutine with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- f.Stop()
+	}()
+	
+	// Wait for shutdown to complete or timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			f.logger.Printf("Error during graceful shutdown: %v", err)
+		} else {
+			f.logger.Println("Graceful shutdown completed")
+		}
+	case <-time.After(10 * time.Second):
+		f.logger.Println("Shutdown timeout reached, forcing exit")
+		os.Exit(1)
 	}
 }
 
@@ -279,6 +295,13 @@ func (f *IoTFramework) RegisterDevice(device Device) error {
 
 	f.devices[deviceID] = device
 	f.logger.Printf("Registered device: %s", deviceID)
+
+	// Emit device registered event
+	evt := event.NewEvent("device.registered", "framework", map[string]interface{}{
+		"device_id": deviceID,
+		"device":    device,
+	})
+	f.Emit(evt)
 
 	// If framework is already running, initialize the device
 	if f.GetState() == LifecycleStarted {
@@ -309,6 +332,12 @@ func (f *IoTFramework) UnregisterDevice(deviceID string) error {
 
 	delete(f.devices, deviceID)
 	f.logger.Printf("Unregistered device: %s", deviceID)
+
+	// Emit device unregistered event
+	evt := event.NewEvent("device.unregistered", "framework", map[string]interface{}{
+		"device_id": deviceID,
+	})
+	f.Emit(evt)
 
 	return nil
 }

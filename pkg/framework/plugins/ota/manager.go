@@ -319,11 +319,20 @@ func (m *ManagerImpl) reportVersion() {
 func (m *ManagerImpl) updateCheckLoop() {
 	defer m.wg.Done()
 	
-	// Initial check after 30 seconds
+	// Use a very short initial delay to improve responsiveness  
+	initialDelay := 5 * time.Second
 	select {
-	case <-time.After(30 * time.Second):
-		m.CheckUpdate()
+	case <-time.After(initialDelay):
+		// Only check update if we're not being stopped
+		select {
+		case <-m.stopCh:
+			m.logger.Println("Update check loop stopped before initial check")
+			return
+		default:
+			m.CheckUpdate()
+		}
 	case <-m.stopCh:
+		m.logger.Println("Update check loop stopped during initial delay")
 		return
 	}
 	
@@ -336,6 +345,7 @@ func (m *ManagerImpl) updateCheckLoop() {
 		case <-ticker.C:
 			m.CheckUpdate()
 		case <-m.stopCh:
+			m.logger.Println("Update check loop stopped")
 			return
 		}
 	}

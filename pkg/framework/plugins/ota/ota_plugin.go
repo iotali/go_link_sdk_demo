@@ -23,20 +23,21 @@ const (
 
 // OTAPlugin implements OTA functionality as a framework plugin
 type OTAPlugin struct {
-	name          string
-	version       string
-	description   string
-	status        PluginStatus
-	framework     core.Framework
-	mqttClient    *mqtt.Client
-	managers      map[string]Manager
-	deviceWrappers map[string]*DeviceWrapper
-	mu            sync.RWMutex
-	logger        *log.Logger
-	autoUpdate    bool
-	checkInterval time.Duration
-	stopCh        chan struct{}
-	wg            sync.WaitGroup
+	name               string
+	version            string
+	description        string
+	status             PluginStatus
+	framework          core.Framework
+	mqttClient         *mqtt.Client
+	mqttClientProvider interface{}
+	managers           map[string]Manager
+	deviceWrappers     map[string]*DeviceWrapper
+	mu                 sync.RWMutex
+	logger             *log.Logger
+	autoUpdate         bool
+	checkInterval      time.Duration
+	stopCh             chan struct{}
+	wg                 sync.WaitGroup
 }
 
 // NewOTAPlugin creates a new OTA plugin
@@ -120,31 +121,12 @@ func (p *OTAPlugin) Configure(config map[string]interface{}) error {
 func (p *OTAPlugin) Start() error {
 	p.logger.Println("Starting OTA plugin")
 	
-	// Get MQTT client from framework
-	mqttPlugin, err := p.framework.GetPlugin("mqtt")
-	if err != nil {
-		return fmt.Errorf("MQTT plugin not found: %v", err)
-	}
+	// Don't initialize MQTT client immediately - defer it until stable connection
+	p.logger.Println("OTA plugin will initialize MQTT client when needed")
 	
-	// Type assert to get MQTT client
-	type mqttClientProvider interface {
-		GetMQTTClient() *mqtt.Client
-	}
-	
-	provider, ok := mqttPlugin.(mqttClientProvider)
-	if !ok {
-		return fmt.Errorf("MQTT plugin does not provide GetMQTTClient method")
-	}
-	
-	p.mqttClient = provider.GetMQTTClient()
-	
-	// Note: Device registration will be handled via events
-	// since framework doesn't expose GetAllDevices directly
-	
-	// Don't start auto-update checker if no devices registered
-	// It will be started when first device is registered
-	
+	// Set plugin status to running
 	p.SetStatus(PluginStatusRunning)
+	p.logger.Println("OTA plugin started successfully")
 	return nil
 }
 
@@ -157,20 +139,7 @@ func (p *OTAPlugin) Stop() error {
 		return nil
 	}
 	
-	// Stop all managers first
-	p.mu.Lock()
-	for deviceID, manager := range p.managers {
-		if manager != nil {
-			if err := manager.Stop(); err != nil {
-				p.logger.Printf("Failed to stop OTA manager for device %s: %v", deviceID, err)
-			}
-		}
-	}
-	p.managers = make(map[string]Manager)
-	p.deviceWrappers = make(map[string]*DeviceWrapper)
-	p.mu.Unlock()
-	
-	// Then signal stop to plugin goroutines
+	// Signal stop to plugin goroutines FIRST to prevent new operations
 	if p.stopCh != nil {
 		select {
 		case <-p.stopCh:
@@ -180,7 +149,22 @@ func (p *OTAPlugin) Stop() error {
 		}
 	}
 	
-	// Wait for goroutines with timeout
+	// Stop all managers
+	p.mu.Lock()
+	managerStopErrors := make([]error, 0)
+	for deviceID, manager := range p.managers {
+		if manager != nil {
+			if err := manager.Stop(); err != nil {
+				p.logger.Printf("Failed to stop OTA manager for device %s: %v", deviceID, err)
+				managerStopErrors = append(managerStopErrors, err)
+			}
+		}
+	}
+	p.managers = make(map[string]Manager)
+	p.deviceWrappers = make(map[string]*DeviceWrapper)
+	p.mu.Unlock()
+	
+	// Wait for goroutines with shorter timeout for better responsiveness
 	done := make(chan struct{})
 	go func() {
 		p.wg.Wait()
@@ -189,12 +173,18 @@ func (p *OTAPlugin) Stop() error {
 	
 	select {
 	case <-done:
-		// All goroutines finished
-	case <-time.After(5 * time.Second):
+		p.logger.Println("All OTA plugin goroutines stopped successfully")
+	case <-time.After(2 * time.Second): // Reduced timeout
 		p.logger.Println("Warning: Timeout waiting for OTA plugin goroutines to stop")
+		// Force continue to prevent hanging
 	}
 	
 	p.SetStatus(PluginStatusStopped)
+	
+	// Return the first manager stop error if any
+	if len(managerStopErrors) > 0 {
+		return managerStopErrors[0]
+	}
 	return nil
 }
 
@@ -243,17 +233,42 @@ func (p *OTAPlugin) SetCheckInterval(interval time.Duration) {
 	p.mu.Unlock()
 }
 
-// createManagerForDevice creates an OTA manager for a device
-func (p *OTAPlugin) createManagerForDevice(dev core.Device) error {
+// SetMQTTClient sets the MQTT client directly to avoid framework plugin deadlocks
+func (p *OTAPlugin) SetMQTTClient(client *mqtt.Client) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	
+	if client == nil {
+		return fmt.Errorf("MQTT client cannot be nil")
+	}
+	
+	p.mqttClient = client
+	p.logger.Println("MQTT client set directly for OTA plugin")
+	return nil
+}
+
+// createManagerForDevice creates an OTA manager for a device
+func (p *OTAPlugin) createManagerForDevice(dev core.Device) error {
 	// Create device wrapper
 	wrapper := NewDeviceWrapper(dev)
 	deviceID := wrapper.GetDeviceID()
+	p.logger.Printf("Creating OTA manager for device %s", deviceID)
 	
-	// Check if manager already exists
+	// Get MQTT client first (without holding the main lock to avoid deadlock)
+	p.logger.Printf("Getting MQTT client for device %s...", deviceID)
+	mqttClient := p.getMQTTClient()
+	if mqttClient == nil {
+		return fmt.Errorf("MQTT client not available for device %s", deviceID)
+	}
+	p.logger.Printf("Got MQTT client for device %s", deviceID)
+	
+	// Now acquire lock for the manager operations
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	
+	// Check if manager already exists (double-check with lock)
 	if _, exists := p.managers[deviceID]; exists {
+		p.logger.Printf("OTA manager for device %s already exists", deviceID)
 		return nil
 	}
 	
@@ -263,12 +278,14 @@ func (p *OTAPlugin) createManagerForDevice(dev core.Device) error {
 	// Get device credentials
 	productKey := wrapper.GetProductKey()
 	deviceName := wrapper.GetDeviceName()
+	p.logger.Printf("Device credentials: ProductKey=%s, DeviceName=%s", productKey, deviceName)
 	
 	// Create version provider wrapper
 	versionProvider := &deviceVersionProvider{wrapper: wrapper}
 	
 	// Create OTA manager
-	manager := NewManager(p.mqttClient, productKey, deviceName, versionProvider)
+	p.logger.Printf("Creating OTA manager instance for device %s", deviceID)
+	manager := NewManager(mqttClient, productKey, deviceName, versionProvider)
 	
 	// Set status callback to update device properties
 	manager.SetStatusCallback(func(status Status, progress int32, message string) {
@@ -326,32 +343,104 @@ func (p *OTAPlugin) updateDeviceOTAStatus(wrapper *DeviceWrapper, status Status,
 	p.framework.Emit(evt)
 }
 
+// getMQTTClient safely retrieves the MQTT client with timeout
+func (p *OTAPlugin) getMQTTClient() *mqtt.Client {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	
+	p.logger.Printf("getMQTTClient called, cached client available: %v", p.mqttClient != nil)
+	
+	// Return cached client if available
+	if p.mqttClient != nil {
+		p.logger.Printf("Returning cached MQTT client")
+		return p.mqttClient
+	}
+	
+	// Try to get MQTT plugin directly without goroutine to avoid deadlock
+	mqttPlugin, err := p.framework.GetPlugin("mqtt")
+	if err != nil {
+		p.logger.Printf("Warning: MQTT plugin not found: %v", err)
+		return nil
+	}
+	
+	// Type assert to get MQTT client
+	type mqttClientProvider interface {
+		GetMQTTClient() *mqtt.Client
+	}
+	
+	provider, ok := mqttPlugin.(mqttClientProvider)
+	if !ok {
+		p.logger.Printf("Warning: MQTT plugin does not provide GetMQTTClient method")
+		return nil
+	}
+	
+	// Get client
+	client := provider.GetMQTTClient()
+	if client != nil {
+		p.mqttClient = client
+		p.logger.Printf("Successfully retrieved MQTT client")
+	} else {
+		p.logger.Printf("MQTT client retrieval returned nil")
+	}
+	return client
+}
+
+
 // registerEventHandlers registers event handlers
 func (p *OTAPlugin) registerEventHandlers() {
 	// Handle device registration
 	p.framework.On("device.registered", func(evt *event.Event) error {
-		if data, ok := evt.Data.(map[string]interface{}); ok {
-			if deviceID, ok := data["device_id"].(string); ok {
-				dev, err := p.framework.GetDevice(deviceID)
-				if err == nil {
-					if err := p.RegisterDevice(dev); err != nil {
-						p.logger.Printf("Failed to register device %s for OTA: %v", deviceID, err)
+		// Process device registration asynchronously to avoid blocking
+		go func() {
+			// Wait longer to let all initialization complete and avoid deadlocks
+			time.Sleep(2 * time.Second)
+			
+			if data, ok := evt.Data.(map[string]interface{}); ok {
+				if deviceID, ok := data["device_id"].(string); ok {
+					p.logger.Printf("Processing device registration for %s (delayed)", deviceID)
+					
+					// Try multiple times if framework is busy
+					maxRetries := 3
+					for i := 0; i < maxRetries; i++ {
+						dev, err := p.framework.GetDevice(deviceID)
+						if err == nil {
+							if err := p.RegisterDevice(dev); err != nil {
+								p.logger.Printf("Failed to register device %s for OTA (attempt %d): %v", deviceID, i+1, err)
+								if i < maxRetries-1 {
+									time.Sleep(1 * time.Second)
+									continue
+								}
+							} else {
+								p.logger.Printf("Successfully registered device %s for OTA", deviceID)
+								return
+							}
+						} else {
+							p.logger.Printf("Failed to get device %s (attempt %d): %v", deviceID, i+1, err)
+							if i < maxRetries-1 {
+								time.Sleep(1 * time.Second)
+								continue
+							}
+						}
 					}
+					p.logger.Printf("Failed to register device %s for OTA after %d attempts", deviceID, maxRetries)
 				}
 			}
-		}
+		}()
 		return nil
 	})
 	
 	// Handle device unregistration
 	p.framework.On("device.unregistered", func(evt *event.Event) error {
-		if data, ok := evt.Data.(map[string]interface{}); ok {
-			if deviceID, ok := data["device_id"].(string); ok {
-				if err := p.UnregisterDevice(deviceID); err != nil {
-					p.logger.Printf("Failed to unregister device %s from OTA: %v", deviceID, err)
+		// Process device unregistration asynchronously to avoid blocking
+		go func() {
+			if data, ok := evt.Data.(map[string]interface{}); ok {
+				if deviceID, ok := data["device_id"].(string); ok {
+					if err := p.UnregisterDevice(deviceID); err != nil {
+						p.logger.Printf("Failed to unregister device %s from OTA: %v", deviceID, err)
+					}
 				}
 			}
-		}
+		}()
 		return nil
 	})
 	
@@ -392,6 +481,16 @@ func (p *OTAPlugin) registerEventHandlers() {
 func (p *OTAPlugin) autoUpdateLoop() {
 	defer p.wg.Done()
 	
+	// Add initial check after a short delay
+	initialDelay := 30 * time.Second
+	select {
+	case <-time.After(initialDelay):
+		p.checkAllDevices()
+	case <-p.stopCh:
+		p.logger.Println("Auto-update loop stopped during initial delay")
+		return
+	}
+	
 	ticker := time.NewTicker(p.checkInterval)
 	defer ticker.Stop()
 	
@@ -400,6 +499,7 @@ func (p *OTAPlugin) autoUpdateLoop() {
 		case <-ticker.C:
 			p.checkAllDevices()
 		case <-p.stopCh:
+			p.logger.Println("Auto-update loop stopped")
 			return
 		}
 	}
