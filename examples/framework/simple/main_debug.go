@@ -10,7 +10,7 @@ import (
 	"github.com/iot-go-sdk/pkg/framework/core"
 	"github.com/iot-go-sdk/pkg/framework/event"
 	"github.com/iot-go-sdk/pkg/framework/plugins/mqtt"
-	"github.com/iot-go-sdk/pkg/framework/plugins/ota"
+	// "github.com/iot-go-sdk/pkg/framework/plugins/ota"  // DISABLED FOR DEBUG
 )
 
 // Note: Device implementation moved to electric_oven.go
@@ -44,7 +44,7 @@ func main() {
 			Timeout:       10 * time.Second,
 		},
 		Features: core.FeatureConfig{
-			EnableOTA:     true,
+			EnableOTA:     false, // DISABLED FOR DEBUG
 			EnableShadow:  false,
 			EnableRules:   false,
 			EnableMetrics: false,
@@ -75,13 +75,14 @@ func main() {
 		log.Fatalf("Failed to load MQTT plugin: %v", err)
 	}
 	
+	// OTA PLUGIN DISABLED FOR DEBUG
 	// Create and load OTA plugin
-	otaPlugin := ota.NewOTAPlugin()
-	// Configure OTA plugin for x86 module
-	otaPlugin.SetCheckInterval(5 * time.Minute)
-	if err := framework.LoadPlugin(otaPlugin); err != nil {
-		log.Fatalf("Failed to load OTA plugin: %v", err)
-	}
+	// otaPlugin := ota.NewOTAPlugin()
+	// // Configure OTA plugin for x86 module
+	// otaPlugin.SetCheckInterval(5 * time.Minute)
+	// if err := framework.LoadPlugin(otaPlugin); err != nil {
+	// 	log.Fatalf("Failed to load OTA plugin: %v", err)
+	// }
 
 	// Create and register electric oven device
 	oven := NewElectricOven(
@@ -158,7 +159,7 @@ func main() {
 		
 		return json.Marshal(result)
 	})
-	
+
 	mqttPlugin.RegisterRRPCHandler("EmergencyStop", func(requestId string, payload []byte) ([]byte, error) {
 		log.Printf("RRPC: EmergencyStop request (ID: %s)", requestId)
 		
@@ -179,7 +180,7 @@ func main() {
 	//   "version": "1.0.12",
 	//   "module": "x86"
 	// }
-	log.Println("[OTA] Using framework OTA plugin with x86 module")
+	log.Println("[OTA] DEBUG - OTA plugin disabled for testing")
 
 	log.Println("Electric oven demo started. Press Ctrl+C to exit.")
 	log.Println("Connecting to IoT platform via MQTT...")

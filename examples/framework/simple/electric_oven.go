@@ -29,6 +29,7 @@ type ElectricOven struct {
 	
 	// OTA Properties
 	firmwareVersion  string  // 固件版本
+	firmwareModule   string  // 固件模块 (x86, arm64等)
 	otaStatus        string  // OTA状态: idle, downloading, updating, failed
 	otaProgress      int32   // OTA进度 (0-100)
 	lastUpdateTime   string  // 上次更新时间
@@ -70,7 +71,8 @@ func NewElectricOven(productKey, deviceName, deviceSecret string) *ElectricOven 
 		operationMode:    "待机",
 		internalLight:    false,
 		fanStatus:        false,
-		firmwareVersion:  "1.0.0", // Initial version
+		firmwareVersion:  "1.0.12", // Initial version - matches version.txt
+		firmwareModule:   "x86",    // Module name
 		otaStatus:        "idle",
 		otaProgress:      0,
 		lastUpdateTime:   "",
@@ -97,7 +99,8 @@ func (o *ElectricOven) OnInitialize(ctx context.Context) error {
 	o.framework.RegisterProperty("fan_status", o.getFanStatus, nil)
 	
 	// Register OTA properties
-	o.framework.RegisterProperty("firmware_version", o.getFirmwareVersion, nil)
+	o.framework.RegisterProperty("firmware_version", o.getFirmwareVersion, o.setFirmwareVersion)
+	o.framework.RegisterProperty("firmware_module", o.getFirmwareModule, o.setFirmwareModule)
 	o.framework.RegisterProperty("ota_status", o.getOTAStatus, nil)
 	o.framework.RegisterProperty("ota_progress", o.getOTAProgress, nil)
 	o.framework.RegisterProperty("last_update_time", o.getLastUpdateTime, nil)
@@ -791,6 +794,32 @@ func (o *ElectricOven) getFirmwareVersion() interface{} {
 	o.mutex.RLock()
 	defer o.mutex.RUnlock()
 	return o.firmwareVersion
+}
+
+func (o *ElectricOven) setFirmwareVersion(value interface{}) error {
+	if version, ok := value.(string); ok {
+		o.mutex.Lock()
+		o.firmwareVersion = version
+		o.mutex.Unlock()
+		return nil
+	}
+	return fmt.Errorf("invalid firmware version type")
+}
+
+func (o *ElectricOven) getFirmwareModule() interface{} {
+	o.mutex.RLock()
+	defer o.mutex.RUnlock()
+	return o.firmwareModule
+}
+
+func (o *ElectricOven) setFirmwareModule(value interface{}) error {
+	if module, ok := value.(string); ok {
+		o.mutex.Lock()
+		o.firmwareModule = module
+		o.mutex.Unlock()
+		return nil
+	}
+	return fmt.Errorf("invalid firmware module type")
 }
 
 // getOTAStatus returns the current OTA status

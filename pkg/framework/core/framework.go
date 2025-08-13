@@ -253,9 +253,12 @@ func (f *IoTFramework) Stop() error {
 
 // WaitForShutdown waits for shutdown signal
 func (f *IoTFramework) WaitForShutdown() {
-	<-f.shutdownCh
-	f.logger.Println("Shutdown signal received")
-	f.Stop()
+	f.logger.Println("Waiting for shutdown signal...")
+	sig := <-f.shutdownCh
+	f.logger.Printf("Shutdown signal received: %v", sig)
+	if err := f.Stop(); err != nil {
+		f.logger.Printf("Error during stop: %v", err)
+	}
 }
 
 // RegisterDevice registers a device with the framework

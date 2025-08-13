@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -19,12 +20,19 @@ import (
 	"github.com/iot-go-sdk/pkg/ota"
 )
 
+// VersionInfo stores version and module information
+type VersionInfo struct {
+	Version string `json:"version"`
+	Module  string `json:"module"`
+}
+
 // OTAManager handles firmware updates with self-update capability
 type OTAManager struct {
 	otaClient      *ota.Client
 	mqttClient     *mqtt.Client
 	oven           *ElectricOven
 	currentVersion string
+	currentModule  string
 	versionFile    string
 	executablePath string
 	backupPath     string
@@ -64,6 +72,7 @@ func NewOTAManager(mqttClient *mqtt.Client, productKey, deviceName string, oven 
 		mqttClient:     mqttClient,
 		oven:           oven,
 		currentVersion: currentVersion,
+		currentModule:  "x86", // Default to x86 for this example
 		versionFile:    filepath.Join(dir, "version.txt"),
 		executablePath: execPath,
 		backupPath:     execPath + ".backup",
@@ -81,15 +90,17 @@ func (m *OTAManager) Start() error {
 	m.logger.Printf("Executable path: %s", m.executablePath)
 	m.logger.Printf("Current version: %s", m.currentVersion)
 
-	// Load version from file if exists
-	if savedVersion := m.loadVersion(); savedVersion != "" {
-		m.currentVersion = savedVersion
+	// Load version and module from file if exists
+	if info := m.loadVersionInfo(); info != nil {
+		m.currentVersion = info.Version
+		m.currentModule = info.Module
 		if m.oven != nil {
-			m.oven.SetFirmwareVersion(savedVersion)
+			m.oven.SetFirmwareVersion(info.Version)
 		}
+		m.logger.Printf("Loaded version: %s, module: %s", info.Version, info.Module)
 	} else {
-		// Save current version
-		m.saveVersion(m.currentVersion)
+		// Save current version and module
+		m.saveVersionInfo(m.currentVersion, m.currentModule)
 	}
 
 	// Set up OTA handlers
@@ -100,9 +111,9 @@ func (m *OTAManager) Start() error {
 		return fmt.Errorf("failed to start OTA client: %v", err)
 	}
 
-	// Report current version
-	m.logger.Printf("Reporting version to platform: %s", m.currentVersion)
-	if err := m.otaClient.ReportVersion(m.currentVersion); err != nil {
+	// Report current version with module
+	m.logger.Printf("Reporting version to platform: %s (module: %s)", m.currentVersion, m.currentModule)
+	if err := m.otaClient.ReportVersionWithModule(m.currentVersion, m.currentModule); err != nil {
 		m.logger.Printf("Failed to report version: %v", err)
 	}
 
@@ -297,7 +308,7 @@ func (m *OTAManager) performUpdate(task *ota.TaskDesc, downloadedData *[]byte) {
 		// For test updates without version, increment version
 		newVersion = m.incrementVersion(m.currentVersion)
 	}
-	m.saveVersion(newVersion)
+	m.saveVersionInfo(newVersion, m.currentModule)
 
 	// Step 6: Report success and prepare for restart
 	m.logger.Printf("Update successful, preparing to restart with version %s...", newVersion)
@@ -500,19 +511,50 @@ func (m *OTAManager) queryUpdatesLoop() {
 	}
 }
 
-// loadVersion loads version from file
-func (m *OTAManager) loadVersion() string {
+// loadVersionInfo loads version info from file
+func (m *OTAManager) loadVersionInfo() *VersionInfo {
 	data, err := os.ReadFile(m.versionFile)
 	if err != nil {
-		return ""
+		return nil
 	}
-	return strings.TrimSpace(string(data))
+	
+	// Try to parse as JSON first
+	var info VersionInfo
+	if err := json.Unmarshal(data, &info); err == nil {
+		// Set default module if empty
+		if info.Module == "" {
+			info.Module = "default"
+		}
+		return &info
+	}
+	
+	// Fallback to plain text (backward compatibility)
+	version := strings.TrimSpace(string(data))
+	if version != "" {
+		return &VersionInfo{
+			Version: version,
+			Module:  "x86", // Default to x86 for backward compatibility
+		}
+	}
+	
+	return nil
 }
 
-// saveVersion saves version to file
-func (m *OTAManager) saveVersion(version string) {
-	if err := os.WriteFile(m.versionFile, []byte(version), 0644); err != nil {
-		m.logger.Printf("Failed to save version: %v", err)
+// saveVersionInfo saves version info to file
+func (m *OTAManager) saveVersionInfo(version, module string) {
+	info := VersionInfo{
+		Version: version,
+		Module:  module,
+	}
+	
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		m.logger.Printf("Failed to marshal version info: %v", err)
+		return
+	}
+	
+	if err := os.WriteFile(m.versionFile, data, 0644); err != nil {
+		m.logger.Printf("Failed to save version info: %v", err)
 	}
 }
 
