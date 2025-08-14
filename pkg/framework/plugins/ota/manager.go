@@ -135,13 +135,19 @@ func (m *ManagerImpl) CheckUpdate() (*UpdateInfo, error) {
 	// First report current version to ensure platform knows our current state
 	m.reportVersion()
 	
-	// Then query for firmware updates - this is the key step that was missing!
-	if err := m.otaClient.QueryFirmware(); err != nil {
+	// Get the module name for the firmware query
+	module := "default"
+	if m.versionProvider != nil {
+		module = m.versionProvider.GetModule()
+	}
+	
+	// Then query for firmware updates with module parameter - this is the key step that was missing!
+	if err := m.otaClient.QueryFirmwareWithModule(module); err != nil {
 		m.logger.Printf("Failed to query firmware updates: %v", err)
 		return nil, err
 	}
 	
-	m.logger.Println("Firmware update query sent, waiting for platform response...")
+	m.logger.Printf("Firmware update query sent for module '%s', waiting for platform response...", module)
 	
 	// Updates are handled asynchronously via callback
 	return nil, nil
@@ -208,13 +214,24 @@ func (m *ManagerImpl) PerformUpdate(info *UpdateInfo) (*UpdateResult, error) {
 		}, nil
 	}
 	
-	// Update version
+	// Update version in device properties
 	if err := m.versionProvider.SetVersion(info.Version); err != nil {
-		m.logger.Printf("Failed to save version: %v", err)
+		m.logger.Printf("Failed to save version to device: %v", err)
 	}
 	
-	// Report progress
-	m.otaClient.ReportProgress("download", "Update prepared", 100, "")
+	// Also update the version.txt file directly to persist the new version
+	if err := m.updateVersionFile(info.Version); err != nil {
+		m.logger.Printf("Failed to update version.txt file: %v", err)
+	} else {
+		m.logger.Printf("Successfully updated version.txt to version %s", info.Version)
+	}
+	
+	// Report progress with module info
+	module := "default"
+	if m.versionProvider != nil {
+		module = m.versionProvider.GetModule()
+	}
+	m.otaClient.ReportProgress("download", "Update prepared", 100, module)
 	
 	// Execute update (this may restart the process)
 	m.setStatus(StatusRestarting)
@@ -375,11 +392,19 @@ func (m *ManagerImpl) notifyStatus(status Status, progress int32, message string
 		callback(status, progress, message)
 	}
 	
-	// Report to platform
+	// Get module name for progress reporting
+	module := "default"
+	if m.versionProvider != nil {
+		module = m.versionProvider.GetModule()
+	}
+	
+	// Report to platform with proper progress format
 	if status == StatusFailed {
-		m.otaClient.ReportProgress("download", message, -1, "")
+		m.otaClient.ReportProgress("download", message, -1, module)
 	} else if status == StatusDownloading || status == StatusVerifying || status == StatusUpdating {
-		m.otaClient.ReportProgress("download", message, int(progress), "")
+		// Report progress as percentage (0-100)
+		m.otaClient.ReportProgress("download", message, int(progress), module)
+		m.logger.Printf("Reported progress: %d%% (%s) - %s", progress, module, message)
 	}
 }
 
@@ -494,4 +519,50 @@ func (p *FileVersionProvider) SetModule(module string) error {
 	}
 	p.cache.Module = module
 	return p.save()
+}
+
+// updateVersionFile updates the version.txt file with new version and module information
+func (m *ManagerImpl) updateVersionFile(newVersion string) error {
+	// Get current module name
+	module := "default"
+	if m.versionProvider != nil {
+		module = m.versionProvider.GetModule()
+	}
+	
+	// Try multiple possible locations for version.txt (same logic as in electric_oven.go)
+	possiblePaths := []string{
+		"version.txt",                    // Current working directory (for go run)
+		"./version.txt",                  // Explicit current directory
+	}
+	
+	// Add executable directory path if available (for compiled binary)
+	if execPath, err := os.Executable(); err == nil {
+		execPath, _ = filepath.EvalSymlinks(execPath) // Resolve symlinks
+		dir := filepath.Dir(execPath)
+		possiblePaths = append(possiblePaths, filepath.Join(dir, "version.txt"))
+	}
+	
+	// Create version info structure
+	versionInfo := VersionInfo{
+		Version: newVersion,
+		Module:  module,
+	}
+	
+	// Marshal to JSON
+	data, err := json.MarshalIndent(versionInfo, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal version info: %v", err)
+	}
+	
+	// Try to write to the first accessible location
+	var lastErr error
+	for _, path := range possiblePaths {
+		lastErr = os.WriteFile(path, data, 0644)
+		if lastErr == nil {
+			m.logger.Printf("Updated version file at %s with version %s (module: %s)", path, newVersion, module)
+			return nil
+		}
+	}
+	
+	return fmt.Errorf("failed to write version file to any location (%v): %v", possiblePaths, lastErr)
 }

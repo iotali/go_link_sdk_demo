@@ -266,6 +266,166 @@ framework.Start()
 otaPlugin.SetMQTTClient(mqttPlugin.GetMQTTClient())
 ```
 
+### 问题5: 固件查询缺少模块参数
+**现象**: 固件查询时params为空，平台返回空数据
+```
+Published message to topic: /sys/.../thing/ota/firmware/get
+{"id":"...","version":"1.0","params":{}}  // params为空
+Received OTA message: {"code":200,"data":{}}  // 无固件更新
+```
+
+**根本原因**: `QueryFirmware()`方法没有携带模块参数，平台无法识别设备类型
+
+**解决方案**: 修改OTA查询流程，添加模块参数支持
+```go
+// pkg/ota/ota.go - 添加带模块参数的查询方法
+func (c *Client) QueryFirmwareWithModule(module string) error {
+    params := map[string]interface{}{}
+    if module != "" {
+        params["module"] = module
+    }
+    
+    payload := map[string]interface{}{
+        "id":      fmt.Sprintf("%d", time.Now().UnixNano()),
+        "version": "1.0",
+        "params":  params,  // 包含模块参数
+    }
+    // ...
+}
+
+// pkg/framework/plugins/ota/manager.go - 在查询时传递模块参数
+func (m *ManagerImpl) CheckUpdate() (*UpdateInfo, error) {
+    // 获取模块名称
+    module := "default"
+    if m.versionProvider != nil {
+        module = m.versionProvider.GetModule()
+    }
+    
+    // 使用带模块参数的查询方法
+    if err := m.otaClient.QueryFirmwareWithModule(module); err != nil {
+        return nil, err
+    }
+    // ...
+}
+```
+
+**修复效果**:
+```
+Published message to topic: /sys/.../thing/ota/firmware/get
+{"id":"...","version":"1.0","params":{"module":"arm"}}  // 包含模块参数
+Received OTA message: {"code":200,"data":{"version":"1.0.13","module":"arm",...}}  // 返回对应固件
+```
+
+### 问题6: 进度上报格式不正确
+**现象**: 进度上报缺少模块信息，格式不规范
+
+**根本原因**: `ReportProgress`调用时缺少模块参数，进度信息不完整
+
+**解决方案**: 修复进度上报格式，包含完整模块信息
+```go
+// pkg/framework/plugins/ota/manager.go - 修复进度上报
+func (m *ManagerImpl) notifyStatus(status Status, progress int32, message string) {
+    // 获取模块名称
+    module := "default"
+    if m.versionProvider != nil {
+        module = m.versionProvider.GetModule()
+    }
+    
+    // 上报进度时包含模块信息
+    if status == StatusDownloading || status == StatusVerifying || status == StatusUpdating {
+        m.otaClient.ReportProgress("download", message, int(progress), module)
+        m.logger.Printf("Reported progress: %d%% (%s) - %s", progress, module, message)
+    }
+}
+```
+
+**修复效果**:
+```
+[OTA-S4Wj7RZ5TO] Reported progress: 0% (arm) - Starting download
+[OTA-S4Wj7RZ5TO] Reported progress: 1% (arm) - Downloading: 101919/9818066 bytes
+[OTA-S4Wj7RZ5TO] Reported progress: 25% (arm) - Downloading: 2454516/9818066 bytes
+```
+
+### 问题7: 版本文件更新缺失
+**现象**: OTA升级成功后，version.txt文件未更新，重启后仍报告旧版本
+
+**根本原因**: 只更新了设备属性，没有持久化到version.txt文件
+
+**解决方案**: 添加版本文件更新机制
+```go
+// pkg/framework/plugins/ota/manager.go - 添加版本文件更新
+func (m *ManagerImpl) updateVersionFile(newVersion string) error {
+    // 获取当前模块名
+    module := "default"
+    if m.versionProvider != nil {
+        module = m.versionProvider.GetModule()
+    }
+    
+    // 创建版本信息结构
+    versionInfo := VersionInfo{
+        Version: newVersion,
+        Module:  module,
+    }
+    
+    // 尝试多个可能的位置写入version.txt
+    possiblePaths := []string{
+        "version.txt",      // 当前工作目录
+        "./version.txt",    // 显式当前目录
+    }
+    
+    // 添加可执行文件目录路径
+    if execPath, err := os.Executable(); err == nil {
+        execPath, _ = filepath.EvalSymlinks(execPath)
+        dir := filepath.Dir(execPath)
+        possiblePaths = append(possiblePaths, filepath.Join(dir, "version.txt"))
+    }
+    
+    // 保存为JSON格式
+    data, err := json.MarshalIndent(versionInfo, "", "  ")
+    if err != nil {
+        return fmt.Errorf("failed to marshal version info: %v", err)
+    }
+    
+    // 写入文件
+    for _, path := range possiblePaths {
+        if err := os.WriteFile(path, data, 0644); err == nil {
+            m.logger.Printf("Updated version file at %s with version %s (module: %s)", 
+                path, newVersion, module)
+            return nil
+        }
+    }
+    
+    return fmt.Errorf("failed to write version file to any location")
+}
+
+// 在OTA升级成功后调用
+func (m *ManagerImpl) PerformUpdate(info *UpdateInfo) (*UpdateResult, error) {
+    // ... 下载和验证逻辑
+    
+    // 更新设备属性
+    if err := m.versionProvider.SetVersion(info.Version); err != nil {
+        m.logger.Printf("Failed to save version to device: %v", err)
+    }
+    
+    // 更新版本文件
+    if err := m.updateVersionFile(info.Version); err != nil {
+        m.logger.Printf("Failed to update version.txt file: %v", err)
+    } else {
+        m.logger.Printf("Successfully updated version.txt to version %s", info.Version)
+    }
+    
+    // ...
+}
+```
+
+**修复效果**:
+```
+[OTA-S4Wj7RZ5TO] Successfully updated version.txt to version 1.0.13
+// 重启后
+[S4Wj7RZ5TO] Loaded version info from version.txt: version=1.0.13, module=arm
+[OTA-S4Wj7RZ5TO] Starting OTA manager, current version: 1.0.13
+```
+
 ## 🔧 调试技巧
 
 ### 1. 检查后台进程冲突
@@ -321,7 +481,64 @@ for i := 0; i < maxRetries; i++ {
 迁移到框架层OTA插件后，电烤炉示例的代码更简洁，功能更完整，维护更方便。这是推荐的OTA实现方式。
 
 通过解决上述已知问题，现在系统可以：
-- ✅ 正常启动和停止（Ctrl+C响应）
-- ✅ 自动进行OTA版本检查
-- ✅ 稳定的MQTT客户端管理
-- ✅ 完整的OTA生命周期支持
+- ✅ **正常启动和停止**（Ctrl+C响应）
+- ✅ **自动进行OTA版本检查**（带模块参数）
+- ✅ **稳定的MQTT客户端管理**（避免死锁）
+- ✅ **正确的进度上报**（包含百分比和模块信息）
+- ✅ **版本文件持久化**（自动更新version.txt）
+- ✅ **完整的OTA生命周期支持**（从查询到升级完成）
+
+## 🚀 完整的OTA工作流程
+
+修复后的OTA系统完整工作流程：
+
+### 1. 启动阶段
+```
+[S4Wj7RZ5TO] Loaded version info from version.txt: version=1.0.12, module=arm
+[OTA-S4Wj7RZ5TO] Starting OTA manager, current version: 1.0.12
+[OTA-S4Wj7RZ5TO] Reporting version to platform: 1.0.12 (module: arm)
+```
+
+### 2. 查询阶段
+```
+[OTA-S4Wj7RZ5TO] Checking for updates...
+Published message to topic: /sys/QLTMkOfW/S4Wj7RZ5TO/thing/ota/firmware/get
+Payload: {"id":"...","version":"1.0","params":{"module":"arm"}}
+Queried for firmware updates (module: arm)
+```
+
+### 3. 响应阶段
+```
+Received OTA message: {"code":200,"data":{"version":"1.0.13","module":"arm","size":9818066,...}}
+[OTA-S4Wj7RZ5TO] === OTA Update Available ===
+[OTA-S4Wj7RZ5TO] Current version: 1.0.12
+[OTA-S4Wj7RZ5TO] New version: 1.0.13
+[OTA-S4Wj7RZ5TO] Size: 9818066 bytes
+```
+
+### 4. 下载阶段
+```
+[OTA-S4Wj7RZ5TO] Reported progress: 0% (arm) - Starting download
+[OTA-S4Wj7RZ5TO] Reported progress: 1% (arm) - Downloading: 101919/9818066 bytes
+[OTA-S4Wj7RZ5TO] Reported progress: 25% (arm) - Downloading: 2454516/9818066 bytes
+[OTA-S4Wj7RZ5TO] Reported progress: 50% (arm) - Verifying firmware
+[OTA-S4Wj7RZ5TO] Reported progress: 75% (arm) - Preparing update
+[OTA-S4Wj7RZ5TO] Reported progress: 100% (arm) - Update prepared
+```
+
+### 5. 升级阶段
+```
+[OTA-S4Wj7RZ5TO] Successfully updated version.txt to version 1.0.13
+[OTA-S4Wj7RZ5TO] Reported progress: 100% (arm) - Restarting with new version
+[OTA-S4Wj7RZ5TO] Update completed successfully
+```
+
+### 6. 重启验证
+```
+// 设备重启后
+[S4Wj7RZ5TO] Loaded version info from version.txt: version=1.0.13, module=arm
+[OTA-S4Wj7RZ5TO] Starting OTA manager, current version: 1.0.13
+[OTA-S4Wj7RZ5TO] Reporting version to platform: 1.0.13 (module: arm)
+```
+
+现在OTA系统完全按照IoT标准流程工作，支持多模块、进度上报、版本持久化等完整功能！

@@ -224,12 +224,22 @@ func (c *Client) ReportProgress(step string, desc string, progress int, module s
 
 // QueryFirmware queries for available firmware updates
 func (c *Client) QueryFirmware() error {
+	return c.QueryFirmwareWithModule("")
+}
+
+// QueryFirmwareWithModule queries for available firmware updates with module parameter
+func (c *Client) QueryFirmwareWithModule(module string) error {
 	topic := fmt.Sprintf("/sys/%s/%s/thing/ota/firmware/get", c.productKey, c.deviceName)
+	
+	params := map[string]interface{}{}
+	if module != "" {
+		params["module"] = module
+	}
 	
 	payload := map[string]interface{}{
 		"id":      fmt.Sprintf("%d", time.Now().UnixNano()),
 		"version": "1.0",
-		"params":  map[string]interface{}{},
+		"params":  params,
 	}
 
 	data, err := json.Marshal(payload)
@@ -241,7 +251,11 @@ func (c *Client) QueryFirmware() error {
 		return fmt.Errorf("failed to publish firmware query: %w", err)
 	}
 
-	c.logger.Printf("Queried for firmware updates")
+	if module != "" {
+		c.logger.Printf("Queried for firmware updates (module: %s)", module)
+	} else {
+		c.logger.Printf("Queried for firmware updates")
+	}
 	return nil
 }
 
