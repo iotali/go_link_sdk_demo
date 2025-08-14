@@ -148,10 +148,11 @@ mqttPlugin.RegisterRRPCHandler("MethodName", func(requestId string, payload []by
 ### Framework Example - Electric Oven
 
 `examples/framework/simple/` contains a complete smart oven implementation:
-- **Properties**: temperature, heater_status, door_status, timer_setting, etc.
+- **Properties**: temperature, heater_status, door_status, timer_setting, firmware_version, firmware_module
 - **Services**: set_temperature, start_timer, toggle_door
 - **Events**: timer_complete, overheat_warning
 - **RRPC Methods**: GetOvenStatus, SetOvenTemperature, EmergencyStop
+- **OTA Integration**: Framework OTA plugin with multi-module support, automatic version checking
 - **Dynamic Behavior**: Adjusts reporting frequency based on activity
 
 ## Required Configuration
@@ -249,11 +250,12 @@ kill -9 <PID>   # Force
 - ✅ Event-driven framework with Thing Model
 - ✅ Service routing fixed
 - ✅ RRPC framework integration
+- ✅ OTA framework plugin with multi-module support
 
 ### Pending Framework Features
 - **P1**: Service response mechanism
 - **P2**: Batch property operations, property query
-- **P3**: Shadow device, OTA support, device grouping
+- **P3**: Shadow device, device grouping
 - **P4**: Rule engine, data persistence, offline caching
 
 ### Known Issues
