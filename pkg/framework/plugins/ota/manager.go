@@ -132,9 +132,16 @@ func (m *ManagerImpl) GetCurrentVersion() string {
 func (m *ManagerImpl) CheckUpdate() (*UpdateInfo, error) {
 	m.logger.Println("Checking for updates...")
 	
-	// Query update by reporting current version
-	// This will trigger the platform to send update info if available
+	// First report current version to ensure platform knows our current state
 	m.reportVersion()
+	
+	// Then query for firmware updates - this is the key step that was missing!
+	if err := m.otaClient.QueryFirmware(); err != nil {
+		m.logger.Printf("Failed to query firmware updates: %v", err)
+		return nil, err
+	}
+	
+	m.logger.Println("Firmware update query sent, waiting for platform response...")
 	
 	// Updates are handled asynchronously via callback
 	return nil, nil
