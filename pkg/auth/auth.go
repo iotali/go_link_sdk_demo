@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"time"
 )
 
 type Credentials struct {
@@ -14,19 +15,23 @@ type Credentials struct {
 }
 
 func GenerateMQTTCredentials(productKey, deviceName, deviceSecret, secureMode string) *Credentials {
-	timestamp := "2524608000000" // 固定时间戳，与C SDK保持一致
-	sdkVersion := "sdk-go-4.2.0"  // 使用与C SDK类似的版本格式
-	
-	clientID := fmt.Sprintf("%s.%s|timestamp=%s,_ss=1,_v=%s,securemode=%s,signmethod=hmacsha256,ext=3,_conn=tl|",
-		productKey, deviceName, timestamp, sdkVersion, secureMode)
-	
+	return GenerateMQTTCredentialsAt(productKey, deviceName, deviceSecret, secureMode, time.Now())
+}
+
+func GenerateMQTTCredentialsAt(productKey, deviceName, deviceSecret, secureMode string, now time.Time) *Credentials {
+	timestamp := fmt.Sprintf("%d", now.UnixMilli())
+	nonce := fmt.Sprintf("%d", now.UnixNano())
+
+	clientID := fmt.Sprintf("%s.%s|timestamp=%s,_ss=1,_v=4,securemode=%s,signmethod=hmacsha256,ext=3,%s|",
+		productKey, deviceName, timestamp, secureMode, nonce)
+
 	username := fmt.Sprintf("%s&%s", deviceName, productKey)
-	
+
 	signContent := fmt.Sprintf("clientId%s.%sdeviceName%sproductKey%stimestamp%s",
 		productKey, deviceName, deviceName, productKey, timestamp)
-	
+
 	password := calculateHMACSHA256(signContent, deviceSecret)
-	
+
 	return &Credentials{
 		ClientID: clientID,
 		Username: username,
