@@ -121,7 +121,21 @@ The framework implements standard Thing Model with `$SYS/` prefix topics:
 ### Event Operations
 - **Upload**: `$SYS/{ProductKey}/{DeviceName}/event/post`
 
-**Event Format**: `{"eventType": "timer_complete", "timestamp": 1234567890, "data": {}}`
+**Event Format**:
+```json
+{
+  "id": "1754475911000",
+  "version": "1.0",
+  "params": {
+    "timer_complete": {
+      "value": {
+        "duration": 60
+      },
+      "time": 1754475911000
+    }
+  }
+}
+```
 
 ### Service Operations
 - **Invoke**: `$SYS/{ProductKey}/{DeviceName}/service/{serviceName}/invoke`

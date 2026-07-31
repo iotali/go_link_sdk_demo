@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,10 +97,10 @@ func (p *MQTTPlugin) Start() error {
 	// Initialize and start RRPC client
 	p.rrpcClient = rrpc.NewRRPCClient(p.client, p.config.Device.ProductKey, p.config.Device.DeviceName)
 	p.rrpcClient.SetLogger(p.logger)
-	
+
 	// Register RRPC handlers from framework
 	p.registerRRPCHandlers()
-	
+
 	if err := p.rrpcClient.Start(); err != nil {
 		p.logger.Printf("[MQTT Plugin] Warning: Failed to start RRPC client: %v", err)
 		// Continue without RRPC support
@@ -409,18 +410,9 @@ func (p *MQTTPlugin) handleEventReportReply(topic string, payload []byte) {
 
 // reportEvent reports an event to the cloud
 func (p *MQTTPlugin) reportEvent(eventData map[string]interface{}) error {
-	eventType, _ := eventData["event_type"].(string)
-
-	// Create event message in Thing Model format
-	msg := map[string]interface{}{
-		"id":      fmt.Sprintf("%d", time.Now().Unix()),
-		"version": "1.0",
-		"params": map[string]interface{}{
-			"eventType": eventType,
-			"value":     eventData["data"],
-			"time":      eventData["timestamp"],
-		},
-		"method": fmt.Sprintf("thing.event.%s.post", eventType),
+	msg, eventType, err := buildEventReportMessage(eventData, time.Now())
+	if err != nil {
+		return err
 	}
 
 	data, err := json.Marshal(msg)
@@ -435,6 +427,92 @@ func (p *MQTTPlugin) reportEvent(eventData map[string]interface{}) error {
 
 	p.logger.Printf("[MQTT Plugin] Reported event %s to %s: %s", eventType, p.eventReportTopic, string(data))
 	return nil
+}
+
+func buildEventReportMessage(eventData map[string]interface{}, now time.Time) (map[string]interface{}, string, error) {
+	eventType, _ := eventData["event_type"].(string)
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return nil, "", fmt.Errorf("event_type is required")
+	}
+	value := eventData["data"]
+	if value == nil {
+		value = map[string]interface{}{}
+	}
+	return map[string]interface{}{
+		"id":      fmt.Sprintf("%d", now.UnixMilli()),
+		"version": "1.0",
+		"params": map[string]interface{}{
+			eventType: map[string]interface{}{
+				"value": value,
+				"time":  eventTimestampMillis(eventData["timestamp"], now),
+			},
+		},
+	}, eventType, nil
+}
+
+func eventTimestampMillis(value interface{}, fallback time.Time) int64 {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UnixMilli()
+	case int:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case int8:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case int16:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case int32:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case int64:
+		return normalizeEpochMillis(typed, fallback)
+	case uint:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case uint8:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case uint16:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case uint32:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case uint64:
+		if typed > uint64(^uint(0)>>1) {
+			return fallback.UnixMilli()
+		}
+		return normalizeEpochMillis(int64(typed), fallback)
+	case float32:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case float64:
+		return normalizeEpochMillis(int64(typed), fallback)
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return fallback.UnixMilli()
+		}
+		return normalizeEpochMillis(parsed, fallback)
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return fallback.UnixMilli()
+		}
+		return normalizeEpochMillis(parsed, fallback)
+	default:
+		return fallback.UnixMilli()
+	}
+}
+
+func normalizeEpochMillis(timestamp int64, fallback time.Time) int64 {
+	if timestamp <= 0 {
+		return fallback.UnixMilli()
+	}
+	switch {
+	case timestamp < 2_000_000_000:
+		return timestamp * 1000
+	case timestamp < 2_000_000_000_000:
+		return timestamp
+	case timestamp < 2_000_000_000_000_000:
+		return timestamp / 1000
+	default:
+		return timestamp / 1_000_000
+	}
 }
 
 // GetClient returns the underlying MQTT client (for advanced usage)
@@ -464,11 +542,11 @@ func (p *MQTTPlugin) registerRRPCHandlers() {
 			Service string                 `json:"service"`
 			Params  map[string]interface{} `json:"params"`
 		}
-		
+
 		if err := json.Unmarshal(payload, &request); err != nil {
 			return nil, fmt.Errorf("invalid request format: %w", err)
 		}
-		
+
 		// Create a service request and emit it to the framework
 		serviceReq := core.ServiceRequest{
 			ID:        requestId,
@@ -476,23 +554,23 @@ func (p *MQTTPlugin) registerRRPCHandlers() {
 			Params:    request.Params,
 			Timestamp: time.Now(),
 		}
-		
+
 		// Emit service call event
 		evt := event.NewEvent(event.EventServiceCall, "rrpc", serviceReq)
 		if err := p.framework.Emit(evt); err != nil {
 			return nil, fmt.Errorf("service invocation failed: %w", err)
 		}
-		
+
 		// For now, return a success response
 		// In a real implementation, we'd wait for the service response
 		response := map[string]interface{}{
 			"code":    0,
 			"message": "Service invoked successfully",
 		}
-		
+
 		return json.Marshal(response)
 	})
-	
+
 	// Register a handler to get device status
 	p.rrpcClient.RegisterHandler("GetDeviceStatus", func(requestId string, payload []byte) ([]byte, error) {
 		// Collect all current property values
@@ -500,7 +578,7 @@ func (p *MQTTPlugin) registerRRPCHandlers() {
 			"status":    "online",
 			"timestamp": time.Now().Unix(),
 		}
-		
+
 		return json.Marshal(status)
 	})
 }

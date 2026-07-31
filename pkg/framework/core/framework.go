@@ -256,13 +256,13 @@ func (f *IoTFramework) WaitForShutdown() {
 	f.logger.Println("Waiting for shutdown signal... (Press Ctrl+C to exit)")
 	sig := <-f.shutdownCh
 	f.logger.Printf("Shutdown signal received: %v, initiating graceful shutdown...", sig)
-	
+
 	// Start shutdown in a separate goroutine with timeout
 	done := make(chan error, 1)
 	go func() {
 		done <- f.Stop()
 	}()
-	
+
 	// Wait for shutdown to complete or timeout
 	select {
 	case err := <-done:
@@ -417,7 +417,7 @@ func (f *IoTFramework) ReportEvent(eventName string, data map[string]interface{}
 	payload := map[string]interface{}{
 		"event_type": eventName,
 		"data":       data,
-		"timestamp":  time.Now().Unix(),
+		"timestamp":  time.Now().UnixMilli(),
 	}
 	evt := event.NewEvent(event.EventEventReport, "framework", payload)
 	return f.eventBus.Publish(evt)
