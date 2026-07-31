@@ -17,12 +17,12 @@ import (
 type MessageHandler func(topic string, payload []byte)
 
 type Client struct {
-	config       *config.Config
-	mqttClient   mqtt.Client
-	connected    bool
-	mutex        sync.RWMutex
-	handlers     map[string]MessageHandler
-	logger       *log.Logger
+	config     *config.Config
+	mqttClient mqtt.Client
+	connected  bool
+	mutex      sync.RWMutex
+	handlers   map[string]MessageHandler
+	logger     *log.Logger
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -54,32 +54,32 @@ func (c *Client) Connect() error {
 	c.logger.Printf("生成的Client ID: %s", credentials.ClientID)
 
 	opts := mqtt.NewClientOptions()
-	
+
 	broker := fmt.Sprintf("tcp://%s:%d", c.config.MQTT.Host, c.config.MQTT.Port)
 	if c.config.MQTT.UseTLS {
 		broker = fmt.Sprintf("ssl://%s:%d", c.config.MQTT.Host, c.config.MQTT.Port)
-		
+
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: c.config.TLS.SkipVerify,
 			ServerName:         c.config.TLS.ServerName,
 		}
-		
+
 		// If ServerName is set but SkipVerify is false, we still want to verify the certificate
 		// but ignore hostname mismatch (since we're connecting by IP)
 		if c.config.TLS.ServerName != "" && !c.config.TLS.SkipVerify {
 			tlsConfig.InsecureSkipVerify = true
 			// We'll manually verify the certificate chain using our custom CA
 		}
-		
+
 		certPool, err := tlsutil.LoadCACert(c.config.TLS.CACert)
 		if err != nil {
 			return fmt.Errorf("failed to load CA certificate: %w", err)
 		}
 		tlsConfig.RootCAs = certPool
-		
+
 		opts.SetTLSConfig(tlsConfig)
 	}
-	
+
 	opts.AddBroker(broker)
 	opts.SetClientID(credentials.ClientID)
 	opts.SetUsername(credentials.Username)
@@ -88,23 +88,23 @@ func (c *Client) Connect() error {
 	opts.SetCleanSession(c.config.MQTT.CleanSession)
 	opts.SetAutoReconnect(true)
 	opts.SetMaxReconnectInterval(30 * time.Second)
-	
+
 	opts.SetDefaultPublishHandler(c.defaultMessageHandler)
 	opts.SetConnectionLostHandler(c.connectionLostHandler)
 	opts.SetOnConnectHandler(c.onConnectHandler)
 	opts.SetReconnectingHandler(c.reconnectingHandler)
 
 	c.mqttClient = mqtt.NewClient(opts)
-	
+
 	token := c.mqttClient.Connect()
 	if token.Wait() && token.Error() != nil {
 		return fmt.Errorf("failed to connect: %w", token.Error())
 	}
-	
+
 	c.mutex.Lock()
 	c.connected = true
 	c.mutex.Unlock()
-	
+
 	c.logger.Printf("Connected to MQTT broker: %s", broker)
 	return nil
 }
@@ -112,7 +112,7 @@ func (c *Client) Connect() error {
 func (c *Client) Disconnect() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	
+
 	if c.mqttClient != nil && c.connected {
 		c.mqttClient.Disconnect(250)
 		c.connected = false
@@ -130,12 +130,12 @@ func (c *Client) Publish(topic string, payload []byte, qos byte, retained bool) 
 	if !c.IsConnected() {
 		return fmt.Errorf("client is not connected")
 	}
-	
+
 	token := c.mqttClient.Publish(topic, qos, retained, payload)
 	if token.Wait() && token.Error() != nil {
 		return fmt.Errorf("failed to publish message: %w", token.Error())
 	}
-	
+
 	c.logger.Printf("Published message to topic: %s", topic)
 	return nil
 }
@@ -144,11 +144,11 @@ func (c *Client) Subscribe(topic string, qos byte, handler MessageHandler) error
 	if !c.IsConnected() {
 		return fmt.Errorf("client is not connected")
 	}
-	
+
 	c.mutex.Lock()
 	c.handlers[topic] = handler
 	c.mutex.Unlock()
-	
+
 	token := c.mqttClient.Subscribe(topic, qos, func(client mqtt.Client, msg mqtt.Message) {
 		c.mutex.RLock()
 		// First try exact match
@@ -157,7 +157,7 @@ func (c *Client) Subscribe(topic string, qos byte, handler MessageHandler) error
 			h(msg.Topic(), msg.Payload())
 			return
 		}
-		
+
 		// Then try wildcard match for subscribed topics
 		for subscribedTopic, handler := range c.handlers {
 			if c.topicMatches(subscribedTopic, msg.Topic()) {
@@ -167,18 +167,18 @@ func (c *Client) Subscribe(topic string, qos byte, handler MessageHandler) error
 			}
 		}
 		c.mutex.RUnlock()
-		
+
 		// Log unhandled message
 		c.logger.Printf("No handler found for topic: %s, message: %s", msg.Topic(), string(msg.Payload()))
 	})
-	
+
 	if token.Wait() && token.Error() != nil {
 		c.mutex.Lock()
 		delete(c.handlers, topic)
 		c.mutex.Unlock()
 		return fmt.Errorf("failed to subscribe to topic: %w", token.Error())
 	}
-	
+
 	c.logger.Printf("Subscribed to topic: %s", topic)
 	return nil
 }
@@ -187,16 +187,16 @@ func (c *Client) Unsubscribe(topic string) error {
 	if !c.IsConnected() {
 		return fmt.Errorf("client is not connected")
 	}
-	
+
 	token := c.mqttClient.Unsubscribe(topic)
 	if token.Wait() && token.Error() != nil {
 		return fmt.Errorf("failed to unsubscribe from topic: %w", token.Error())
 	}
-	
+
 	c.mutex.Lock()
 	delete(c.handlers, topic)
 	c.mutex.Unlock()
-	
+
 	c.logger.Printf("Unsubscribed from topic: %s", topic)
 	return nil
 }
@@ -207,20 +207,20 @@ func (c *Client) topicMatches(pattern, topic string) bool {
 	if !strings.Contains(pattern, "+") {
 		return pattern == topic
 	}
-	
+
 	patternParts := strings.Split(pattern, "/")
 	topicParts := strings.Split(topic, "/")
-	
+
 	if len(patternParts) != len(topicParts) {
 		return false
 	}
-	
+
 	for i, part := range patternParts {
 		if part != "+" && part != topicParts[i] {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
